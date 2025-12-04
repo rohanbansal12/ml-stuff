@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from models.resnet import BasicBlock, ResNet
+from models.resnet import resnet18, resnet50
 from utils.cifar import get_cifar_data
 
 
@@ -42,7 +42,8 @@ test_loader = DataLoader(
 # -----------------------
 # 3. Model
 # -----------------------
-model = ResNet(BasicBlock, [2, 2, 2, 2]).to(device)
+model = resnet18().to(device)
+# model = resnet50().to(device)
 
 # -----------------------
 # 4. Loss & Optimizer
