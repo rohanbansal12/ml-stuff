@@ -27,7 +27,7 @@ class BasicBlock(nn.Module):
         out = self.relu(out + identity)
         return out
 
-class BottleBlock(nn.Module):
+class Bottleneck(nn.Module):
     expansion = 4
 
     def __init__(self, in_channels, out_channels, stride=1, downsample=None):
@@ -41,7 +41,7 @@ class BottleBlock(nn.Module):
         self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.conv3 = nn.Conv2d(out_channels, out_channels * self.expansion, kernel_size=1, stride=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(out_channels)
+        self.bn3 = nn.BatchNorm2d(out_channels * self.expansion)
 
         self.downsample = downsample
 
@@ -106,3 +106,13 @@ class ResNet(nn.Module):
         for _ in range(1, blocks):
             layers.append(block(self.in_channels, out_channels, stride=1, downsample=None))
         return nn.Sequential(*layers)
+    
+
+def resnet18(num_classes=10):
+    return ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
+
+def resnet34(num_classes=10):
+    return ResNet(BasicBlock, [3, 4, 6, 3], num_classes=num_classes)
+
+def resnet50(num_classes=10):
+    return ResNet(Bottleneck, [3, 4, 6, 3], num_classes=num_classes)
