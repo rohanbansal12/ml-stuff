@@ -38,7 +38,7 @@ class MultiHeadAttention(nn.Module):
 
         # b, h, s, s -> b, h, s, d_k -> b, s, d_model
         att = scores @ V
-        out = self.W_0(att.transpose(1, 2).view(b, s, d_mod))
+        out = self.W_0(att.transpose(1, 2).reshape(b, s, d_mod))
         return self.drop(out)
     
 class FFN(nn.Module):
@@ -85,6 +85,19 @@ class GPT(nn.Module):
         self.dec = nn.Sequential(*layers)
 
         self.lm_head = nn.Linear(d_model, vocab_size)
+        
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, nn.LayerNorm):
+            torch.nn.init.zeros_(module.bias)
+            torch.nn.init.ones_(module.weight)
 
     def forward(self, x):
         b, t = x.size()
