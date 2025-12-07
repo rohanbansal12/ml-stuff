@@ -14,10 +14,10 @@ class MultiHeadAttention(nn.Module):
         self.seq_len = seq_len
         self.rope = rope
      
-        self.W_Q = nn.Linear(d_model, d_model)
-        self.W_K = nn.Linear(d_model, d_model)
-        self.W_V = nn.Linear(d_model, d_model)
-        self.W_0 = nn.Linear(d_model, d_model)
+        self.W_Q = nn.Linear(d_model, d_model, bias=False)
+        self.W_K = nn.Linear(d_model, d_model, bias=False)
+        self.W_V = nn.Linear(d_model, d_model, bias=False)
+        self.W_0 = nn.Linear(d_model, d_model, bias=False)
 
         mask = torch.tril(torch.ones((seq_len, seq_len))).view(1, 1, seq_len, seq_len)
         causal_mask = torch.zeros((1, 1, seq_len, seq_len))
@@ -69,14 +69,18 @@ class MultiHeadAttention(nn.Module):
             Q = self.apply_rope(Q, cos, sin)
             K = self.apply_rope(K, cos, sin)
 
-        # b, h, s, d_k -> b, h, s, s
-        scores = (Q @ K.transpose(-1, -2)) * (1.0 / math.sqrt(self.d_k))
-        scores = scores + self.causal_mask[:, :, :s, :s]
-        scores = F.softmax(scores, dim=-1)
-        scores = self.drop(scores)
+        # b, h, s, d_k -> b, h, s, s -> b, h, s, d_k
 
-        # b, h, s, s -> b, h, s, d_k -> b, s, d_model
-        att = scores @ V
+            ## I wrote this from scratch attention computation for understanding and can verify it gives same result as the optimized torch version below
+            # scores = (Q @ K.transpose(-1, -2)) * (1.0 / math.sqrt(self.d_k))
+            # scores = scores + self.causal_mask[:, :, :s, :s]
+            # scores = F.softmax(scores, dim=-1)
+            # scores = self.drop(scores)
+            # att = scores @ V
+
+        att = F.scaled_dot_product_attention(Q, K, V, attn_mask=None, dropout_p = self.drop.p, is_causal=True)
+
+        # b, h, s, d_k -> b, s, d_model
         out = self.W_0(att.transpose(1, 2).reshape(b, s, d_mod))
         return self.drop(out)
     
@@ -84,9 +88,9 @@ class FFN(nn.Module):
     def __init__(self, d_model, dropout=.1):
         super().__init__()
 
-        self.lin1 = nn.Linear(d_model, d_model*4)
+        self.lin1 = nn.Linear(d_model, d_model*4, bias=False)
         self.act = nn.GELU()
-        self.lin2 = nn.Linear(d_model*4, d_model)
+        self.lin2 = nn.Linear(d_model*4, d_model, bias=False)
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -98,13 +102,18 @@ class FFN(nn.Module):
         return x
     
 class Block(nn.Module):
-    def __init__(self, d_model, num_heads, seq_len, dropout=.1, rope=False):
+    def __init__(self, d_model, num_heads, seq_len, dropout=.1, rope=False, rmsnorm=False):
         super().__init__()
 
         self.att = MultiHeadAttention(d_model, num_heads, seq_len, dropout, rope)
         self.fc = FFN(d_model, dropout)
-        self.ln1 = nn.LayerNorm(d_model)
-        self.ln2 = nn.LayerNorm(d_model)
+
+        if rmsnorm:
+            self.ln1 = nn.RMSNorm(d_model)
+            self.ln2 = nn.RMSNorm(d_model)
+        else:
+            self.ln1 = nn.LayerNorm(d_model)
+            self.ln2 = nn.LayerNorm(d_model)
         
     def forward(self, x):
         x = x + self.att(self.ln1(x))
@@ -112,7 +121,7 @@ class Block(nn.Module):
         return x
     
 class GPT(nn.Module):
-    def __init__(self, d_model, num_heads, max_seq_len, num_layers, vocab_size, dropout=.1, rope=False):
+    def __init__(self, d_model, num_heads, max_seq_len, num_layers, vocab_size, dropout=.1, rope=False, rmsnorm=False):
         super().__init__()
 
         self.d_model = d_model
@@ -126,7 +135,7 @@ class GPT(nn.Module):
 
         layers = []
         for _ in range(num_layers):
-            layers.append(Block(d_model, num_heads, max_seq_len, dropout=dropout, rope=rope))
+            layers.append(Block(d_model, num_heads, max_seq_len, dropout=dropout, rope=rope, rmsnorm=rmsnorm))
         self.dec = nn.Sequential(*layers)
 
         self.ln_f = nn.LayerNorm(d_model)

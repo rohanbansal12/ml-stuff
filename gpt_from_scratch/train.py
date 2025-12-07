@@ -97,6 +97,7 @@ def main():
     parser.add_argument("--run-name", type=str, default=None,
                     help="Name to show in TensorBoard")
     parser.add_argument("--rope", action="store_true", dest="rope")
+    parser.add_argument("--rmsnorm", action="store_true", dest='rms_norm')
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -110,7 +111,7 @@ def main():
     train_tokens = tokens[:split]
     val_tokens   = tokens[split:]
 
-    model = GPT(args.d_model, args.num_heads, args.max_seq_len, args.num_layers, tokenizer.get_vocab_size(), args.dropout).to(device)
+    model = GPT(args.d_model, args.num_heads, args.max_seq_len, args.num_layers, tokenizer.get_vocab_size(), args.dropout, args.rope, args.rms_norm).to(device)
     print(model)
     print("Num Params: ", sum(p.numel() for p in model.parameters()))
 
