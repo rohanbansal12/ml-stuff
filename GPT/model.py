@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model, num_heads, seq_len, dropout=.1, rope=False):
+    def __init__(self, d_model, num_heads, seq_len, dropout=.1, rope=False, causal=True):
         super().__init__()
         assert d_model % num_heads == 0
         
@@ -13,15 +13,18 @@ class MultiHeadAttention(nn.Module):
         self.d_k = d_model // num_heads
         self.seq_len = seq_len
         self.rope = rope
+        self.causal = causal
      
         self.W_Q = nn.Linear(d_model, d_model, bias=False)
         self.W_K = nn.Linear(d_model, d_model, bias=False)
         self.W_V = nn.Linear(d_model, d_model, bias=False)
         self.W_0 = nn.Linear(d_model, d_model, bias=False)
 
-        mask = torch.tril(torch.ones((seq_len, seq_len))).view(1, 1, seq_len, seq_len)
-        causal_mask = torch.zeros((1, 1, seq_len, seq_len))
-        self.register_buffer("causal_mask", causal_mask.masked_fill_(mask == 0, float("-inf")))
+        if causal:
+            mask = torch.tril(torch.ones((seq_len, seq_len))).view(1, 1, seq_len, seq_len)
+            causal_mask = torch.zeros((1, 1, seq_len, seq_len))
+            self.register_buffer("causal_mask", causal_mask.masked_fill_(mask == 0, float("-inf")))
+
         self.drop = nn.Dropout(dropout)
 
         if rope:
@@ -73,12 +76,13 @@ class MultiHeadAttention(nn.Module):
 
             ## I wrote this from scratch attention computation for understanding and can verify it gives same result as the optimized torch version below
             # scores = (Q @ K.transpose(-1, -2)) * (1.0 / math.sqrt(self.d_k))
-            # scores = scores + self.causal_mask[:, :, :s, :s]
+            # if self.causal:
+                # scores = scores + self.causal_mask[:, :, :s, :s]
             # scores = F.softmax(scores, dim=-1)
             # scores = self.drop(scores)
             # att = scores @ V
 
-        att = F.scaled_dot_product_attention(Q, K, V, attn_mask=None, dropout_p = self.drop.p, is_causal=True)
+        att = F.scaled_dot_product_attention(Q, K, V, attn_mask=None, dropout_p = self.drop.p, is_causal=self.causal)
 
         # b, h, s, d_k -> b, s, d_model
         out = self.W_0(att.transpose(1, 2).reshape(b, s, d_mod))
@@ -102,10 +106,10 @@ class FFN(nn.Module):
         return x
     
 class Block(nn.Module):
-    def __init__(self, d_model, num_heads, seq_len, dropout=.1, rope=False, rmsnorm=False):
+    def __init__(self, d_model, num_heads, seq_len, dropout=.1, rope=False, rmsnorm=False, causal=True):
         super().__init__()
 
-        self.att = MultiHeadAttention(d_model, num_heads, seq_len, dropout, rope)
+        self.att = MultiHeadAttention(d_model, num_heads, seq_len, dropout, rope, causal)
         self.fc = FFN(d_model, dropout)
 
         if rmsnorm:
