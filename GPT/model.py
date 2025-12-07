@@ -168,17 +168,39 @@ class GPT(nn.Module):
         logits = self.lm_head(out)
         return logits
     
+    @staticmethod
+    def top_p_top_k(logits, p, k):
+        if k > 0:
+            v = torch.topk(logits, k, dim=-1).values
+            kth = v[..., -1, None]
+            logits = torch.where(logits < kth, logits.new_full(logits.shape, -float("inf")), logits)
+
+        if p > 0.0 and p < 1.0:
+            sorted_logits, sorted_idx = torch.sort(logits, dim=-1, descending=True)
+            sorted_probs = F.softmax(sorted_logits, dim=-1)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+            sorted_mask = cumulative_probs > p
+            sorted_mask[..., 1:] = sorted_mask[..., :-1].clone()
+            sorted_mask[..., 0] = False
+            sorted_logits = sorted_logits.masked_fill(sorted_mask, -float("inf"))
+            logits = logits.new_full(logits.shape, -float("inf"))
+            logits.scatter_(dim=-1, index=sorted_idx, src=sorted_logits)
+        
+        return logits
+
+    
     @torch.no_grad()
-    def generate(self, x, max_new_tokens, sample=False, temperature=1.0):
+    def generate(self, x, max_new_tokens, sample=False, temperature=1.0, top_k=0, top_p=0):
         temperature = max(temperature, 1e-4)
         self.eval()
         for _ in range(max_new_tokens):
             x_mod = x if x.size(1) <= self.max_seq_len else x[:, -self.max_seq_len:]
             logits = self(x_mod)[:, -1, :] / temperature
-            probs = F.softmax(logits, dim=-1)
             if sample:
+                logits = self.top_p_top_k(logits, top_p, top_k)
+                probs = F.softmax(logits, dim=-1)
                 toks = torch.multinomial(probs, num_samples=1)
             else:
-                toks = torch.topk(probs, k=1, dim=-1).indices
+                toks = torch.topk(logits, k=1, dim=-1).indices
             x = torch.cat((x, toks), dim=1)
         return x
