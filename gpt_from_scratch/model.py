@@ -4,13 +4,15 @@ import torch.nn.functional as F
 import math
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model, num_heads, seq_len, dropout=.1):
+    def __init__(self, d_model, num_heads, seq_len, dropout=.1, rope=False):
         super().__init__()
         assert d_model % num_heads == 0
         
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
+        self.seq_len = seq_len
+        self.rope = rope
      
         self.W_Q = nn.Linear(d_model, d_model)
         self.W_K = nn.Linear(d_model, d_model)
@@ -22,6 +24,37 @@ class MultiHeadAttention(nn.Module):
         self.register_buffer("causal_mask", causal_mask.masked_fill_(mask == 0, float("-inf")))
         self.drop = nn.Dropout(dropout)
 
+        if rope:
+            assert self.d_k % 2 == 0, "RoPE requires head dimension (d_k) to be even."
+            cos, sin = self.build_rope_cache()
+            self.register_buffer("cos", cos)
+            self.register_buffer("sin", sin)
+
+    def build_rope_cache(self):
+        half_dim = self.d_k // 2
+        device = next(self.parameters()).device
+
+        freq_seq = torch.arange(half_dim, device=device)
+        inv_freq = 1.0 / (10000 ** (freq_seq / half_dim))
+
+        positions = torch.arange(self.seq_len, device=device).unsqueeze(1)
+        angles = positions * inv_freq.unsqueeze(0)
+    
+        cos = angles.cos()
+        sin = angles.sin()
+        
+        return cos, sin
+    
+    @staticmethod
+    def apply_rope(x, cos, sin):
+        x_even = x[..., 0::2]
+        x_odd = x[..., 1::2]
+
+        x_rot_even = x_even * cos - x_odd * sin
+        x_rot_odd = x_even * sin + x_odd * cos
+
+        return torch.stack((x_rot_even, x_rot_odd), dim=-1).flatten(-2)
+
     def forward(self, x : torch.Tensor): # input b, s, d_model -> output b, s, d_model
         b, s, d_mod = x.size()
 
@@ -29,6 +62,12 @@ class MultiHeadAttention(nn.Module):
         Q = self.W_Q(x).view(b, s, self.num_heads, self.d_k).transpose(1, 2)
         K = self.W_K(x).view(b, s, self.num_heads, self.d_k).transpose(1, 2)
         V = self.W_V(x).view(b, s, self.num_heads, self.d_k).transpose(1, 2)
+
+        if self.rope:
+            sin = self.sin[:s].unsqueeze(0).unsqueeze(0)
+            cos = self.cos[:s].unsqueeze(0).unsqueeze(0)
+            Q = self.apply_rope(Q, cos, sin)
+            K = self.apply_rope(K, cos, sin)
 
         # b, h, s, d_k -> b, h, s, s
         scores = (Q @ K.transpose(-1, -2)) * (1.0 / math.sqrt(self.d_k))
@@ -59,22 +98,21 @@ class FFN(nn.Module):
         return x
     
 class Block(nn.Module):
-    def __init__(self, d_model, num_heads, seq_len, dropout=.1):
+    def __init__(self, d_model, num_heads, seq_len, dropout=.1, rope=False):
         super().__init__()
 
-        self.att = MultiHeadAttention(d_model, num_heads, seq_len, dropout)
+        self.att = MultiHeadAttention(d_model, num_heads, seq_len, dropout, rope)
         self.fc = FFN(d_model, dropout)
         self.ln1 = nn.LayerNorm(d_model)
         self.ln2 = nn.LayerNorm(d_model)
         
-
     def forward(self, x):
         x = x + self.att(self.ln1(x))
         x = x + self.fc(self.ln2(x))
         return x
     
 class GPT(nn.Module):
-    def __init__(self, d_model, num_heads, max_seq_len, num_layers, vocab_size, dropout=.1):
+    def __init__(self, d_model, num_heads, max_seq_len, num_layers, vocab_size, dropout=.1, rope=False):
         super().__init__()
 
         self.d_model = d_model
@@ -88,7 +126,7 @@ class GPT(nn.Module):
 
         layers = []
         for _ in range(num_layers):
-            layers.append(Block(d_model, num_heads, max_seq_len, dropout=dropout))
+            layers.append(Block(d_model, num_heads, max_seq_len, dropout=dropout, rope=rope))
         self.dec = nn.Sequential(*layers)
 
         self.ln_f = nn.LayerNorm(d_model)

@@ -96,6 +96,7 @@ def main():
     parser.add_argument("--log-dir", type=str, default="./runs/gpt")
     parser.add_argument("--run-name", type=str, default=None,
                     help="Name to show in TensorBoard")
+    parser.add_argument("--rope", action="store_true", dest="rope")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
