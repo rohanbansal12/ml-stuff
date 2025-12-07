@@ -10,6 +10,22 @@ from datetime import datetime
 import os
 import math
 
+@torch.no_grad()
+def sample_text(model, tokenizer, device, args, writer, epoch):
+    model.eval()
+
+    prompt = "To be, or not to be"
+    encoding = tokenizer.encode(prompt)
+    input_ids = torch.tensor([encoding.ids], dtype=torch.long, device=device)
+
+    max_new_tokens = 100
+    gen = model.generate(input_ids, max_new_tokens, sample=True, temperature=args.temperature)
+    gen = gen[0].tolist()
+
+    gen_text = tokenizer.decode(gen)
+    global_step = (epoch + 1) * args.steps - 1
+    writer.add_text("samples", gen_text, global_step)
+
 
 def train_one_epoch(model, tokens, optimizer, device, args, writer, epoch):
     model.train()
@@ -65,17 +81,18 @@ def evaluate(model, tokens, device, args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--steps", type=int, default=500)
-    parser.add_argument("--val_steps", type=int, default=20)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--steps", type=int, default=50)
+    parser.add_argument("--val_steps", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--max_seq_len", type=int, default=128)
-    parser.add_argument("--num_layers", type=int, default=6)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--num_layers", type=int, default=4)
+    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.1)
+    parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--log-dir", type=str, default="./runs/gpt")
     parser.add_argument("--run-name", type=str, default=None,
                     help="Name to show in TensorBoard")
@@ -87,7 +104,7 @@ def main():
     text, tokenizer = train_tokenizer("data/shakespeare.txt")
     encoding = tokenizer.encode(text)
     ids = encoding.ids
-    tokens = torch.tensor(ids, dtype=torch.long)
+    tokens = torch.tensor(ids, dtype=torch.long).to(device)
     split = int(0.9 * len(tokens))
     train_tokens = tokens[:split]
     val_tokens   = tokens[split:]
@@ -115,6 +132,7 @@ def main():
     for epoch in range(args.epochs):
         train_loss, train_perp = train_one_epoch(model, train_tokens, optimizer, device, args, writer, epoch)
         val_loss, val_perp = evaluate(model, val_tokens, device, args)
+        sample_text(model, tokenizer, device, args, writer, epoch)
 
         scheduler.step()
 

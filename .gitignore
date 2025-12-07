@@ -6,7 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
-data/
+data/*
+!data/shakespeare.txt
+
 runs/
 
 # Distribution / packaging

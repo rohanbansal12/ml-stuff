@@ -8,8 +8,10 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         assert d_model % num_heads == 0
         
+        self.d_model = d_model
         self.num_heads = num_heads
-
+        self.d_k = d_model // num_heads
+     
         self.W_Q = nn.Linear(d_model, d_model)
         self.W_K = nn.Linear(d_model, d_model)
         self.W_V = nn.Linear(d_model, d_model)
@@ -18,20 +20,18 @@ class MultiHeadAttention(nn.Module):
         mask = torch.tril(torch.ones((seq_len, seq_len))).view(1, 1, seq_len, seq_len)
         causal_mask = torch.zeros((1, 1, seq_len, seq_len))
         self.register_buffer("causal_mask", causal_mask.masked_fill_(mask == 0, float("-inf")))
-
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x : torch.Tensor): # input b, s, d_model -> output b, s, d_model
         b, s, d_mod = x.size()
-        d_k = d_mod // self.num_heads
 
         # b, s, d_model -> b, s, d_model -> b, s, h, d_k -> b, h, s, d_k
-        Q = self.W_Q(x).view(b, s, self.num_heads, d_k).transpose(1, 2)
-        K = self.W_K(x).view(b, s, self.num_heads, d_k).transpose(1, 2)
-        V = self.W_V(x).view(b, s, self.num_heads, d_k).transpose(1, 2)
+        Q = self.W_Q(x).view(b, s, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.W_K(x).view(b, s, self.num_heads, self.d_k).transpose(1, 2)
+        V = self.W_V(x).view(b, s, self.num_heads, self.d_k).transpose(1, 2)
 
         # b, h, s, d_k -> b, h, s, s
-        scores = (Q @ K.transpose(-1, -2)) * (1.0 / math.sqrt(d_k))
+        scores = (Q @ K.transpose(-1, -2)) * (1.0 / math.sqrt(self.d_k))
         scores = scores + self.causal_mask[:, :, :s, :s]
         scores = F.softmax(scores, dim=-1)
         scores = self.drop(scores)
@@ -51,6 +51,7 @@ class FFN(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x):
+        # b, s, d_model -> b, s, d_model * 4 -> b, s, d_model
         x = self.lin1(x)
         x = self.act(x)
         x = self.lin2(x)
@@ -76,6 +77,12 @@ class GPT(nn.Module):
     def __init__(self, d_model, num_heads, max_seq_len, num_layers, vocab_size, dropout=.1):
         super().__init__()
 
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.max_seq_len = max_seq_len
+        self.num_layers = num_layers
+        self.vocab_size = vocab_size
+
         self.token_emb = nn.Embedding(vocab_size, d_model)
         self.pos_emb = nn.Embedding(max_seq_len, d_model)
 
@@ -84,9 +91,11 @@ class GPT(nn.Module):
             layers.append(Block(d_model, num_heads, max_seq_len, dropout=dropout))
         self.dec = nn.Sequential(*layers)
 
-        self.lm_head = nn.Linear(d_model, vocab_size)
+        self.ln_f = nn.LayerNorm(d_model)
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         
         self.apply(self._init_weights)
+        self.lm_head.weight = self.token_emb.weight
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -104,5 +113,21 @@ class GPT(nn.Module):
         pos = torch.arange(0, t, dtype=torch.long, device=x.device).unsqueeze(0).expand(b, t)
         embs = self.token_emb(x) + self.pos_emb(pos)
         out = self.dec(embs)
+        out = self.ln_f(out)
         logits = self.lm_head(out)
         return logits
+    
+    @torch.no_grad()
+    def generate(self, x, max_new_tokens, sample=False, temperature=1.0):
+        temperature = max(temperature, 1e-4)
+        self.eval()
+        for _ in range(max_new_tokens):
+            x_mod = x if x.size(1) <= self.max_seq_len else x[:, -self.max_seq_len:]
+            logits = self(x_mod)[:, -1, :] / temperature
+            probs = F.softmax(logits, dim=-1)
+            if sample:
+                toks = torch.multinomial(probs, num_samples=1)
+            else:
+                toks = torch.topk(probs, k=1, dim=-1).indices
+            x = torch.cat((x, toks), dim=1)
+        return x
