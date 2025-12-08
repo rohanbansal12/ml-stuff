@@ -3,6 +3,37 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+class RMSNorm(nn.Module):
+    def __init__(self, norm_shape, eps=1e-8):
+        super().__init__()
+        self.norm_shape = tuple(norm_shape)
+        self.dims = tuple(range(-len(self.norm_shape), 0))
+        self.weight = nn.Parameter(torch.ones(self.norm_shape))
+        self.eps = eps
+
+    def forward(self, x):
+        eps = self.eps if self.eps is not None else torch.finfo(x.dtype).eps
+        norms = torch.sqrt(torch.mean(x * x, dim=self.dims, keepdim=True) + eps)
+        return self.weight * x / norms
+    
+class LayerNorm(nn.Module):
+    def __init__(self, norm_shape, bias=True, eps=1e-8):
+        super().__init__()
+        self.norm_shape = tuple(norm_shape)
+        self.dims = tuple(range(-len(self.norm_shape), 0))
+        self.weight = nn.Parameter(torch.ones(self.norm_shape))
+        self.bias = nn.Parameter(torch.zeros(self.norm_shape)) if bias else None
+        self.eps = eps
+
+    def forward(self, x):
+        eps = self.eps if self.eps is not None else torch.finfo(x.dtype).eps
+        var, mean = torch.var_mean(x, dim=self.dims, keepdim=True, correction=0)
+        y = self.weight * (x - mean) / torch.sqrt(var + eps)
+        if self.bias is not None: 
+            y = y + self.bias
+        return y
+
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads, seq_len, dropout=.1, rope=False, causal=True):
         super().__init__()
