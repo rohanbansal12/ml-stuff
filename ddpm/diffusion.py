@@ -28,11 +28,25 @@ def q_sample(x0, t, schedule: DiffusionSchedule, noise=None):
     alphas_cum = schedule.alphas_cumprod.to(x0.device)[t].view(-1, 1, 1, 1)
     return torch.sqrt(alphas_cum) * x0 + torch.sqrt(1 - alphas_cum) * noise
 
-def p_sample_step(model, x_t, t_scalar, schedule: DiffusionSchedule):
+def p_sample_step(model, x_t, t_scalar, schedule: DiffusionSchedule, pred_type):
     b = x_t.size(0)
     t = torch.ones(b, device=x_t.device, dtype=torch.long) * t_scalar
-    eps_theta = model(x_t, t)
+    model_out = model(x_t, t)
     shape = x_t.shape
+
+    if pred_type == 'x0':
+        sqrt_alpha_bar_t = schedule.gather(schedule.sqrt_alphas_cumprod, t, shape)
+        sqrt_one_minus_alpha_bar_t = schedule.gather(schedule.sqrt_one_minus_alphas_cumprod, t, shape)
+        x0_pred = model_out
+        x0_pred = x0_pred.clamp(-1.0, 1.0)
+        eps_theta = (x_t - sqrt_alpha_bar_t * x0_pred) / sqrt_one_minus_alpha_bar_t
+    elif pred_type == 'eps':
+        eps_theta = model_out
+    else:
+        sqrt_alpha_bar_t = schedule.gather(schedule.sqrt_alphas_cumprod, t, shape)
+        sqrt_one_minus_alpha_bar_t = schedule.gather(schedule.sqrt_one_minus_alphas_cumprod, t, shape)
+        v_pred = model_out
+        eps_theta = sqrt_alpha_bar_t * v_pred + sqrt_one_minus_alpha_bar_t * x_t
 
     recip_sqrt_alpha = schedule.gather(schedule.sqrt_recip_alphas, t, shape)
     betas = schedule.gather(schedule.betas, t, shape)
@@ -49,9 +63,9 @@ def p_sample_step(model, x_t, t_scalar, schedule: DiffusionSchedule):
 
     return x_prev
 
-def p_sample_loop(model, schedule : DiffusionSchedule, shape, device, x_t=None):
+def p_sample_loop(model, schedule : DiffusionSchedule, pred_type, shape, device, x_t=None):
     if x_t is None:
         x_t = torch.randn(shape, device=device)
     for t in range(schedule.T-1, -1, -1):
-        x_t = p_sample_step(model, x_t, t, schedule)
+        x_t = p_sample_step(model, x_t, t, schedule, pred_type=pred_type)
     return x_t

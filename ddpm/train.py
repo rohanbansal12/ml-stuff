@@ -10,7 +10,7 @@ from datetime import datetime
 import os
 import torchvision
 
-def train_one_epoch(model, train_loader, optimizer, schedule:DiffusionSchedule, device, writer, epoch):
+def train_one_epoch(model, pred_type, train_loader, optimizer, schedule:DiffusionSchedule, device, writer, epoch):
     model.train()
     running_loss = 0.0
     ll = len(train_loader)
@@ -21,10 +21,21 @@ def train_one_epoch(model, train_loader, optimizer, schedule:DiffusionSchedule, 
         t = schedule.sample_t(x0.size(0), device)
         noise = torch.randn_like(x0)
         x_t = q_sample(x0, t, schedule, noise=noise)
-        noise_pred = model(x_t, t)
-        loss = F.mse_loss(noise_pred, noise)
+        pred = model(x_t, t)
+        if pred_type == "eps":
+            target = noise
+        elif pred_type == "x0":
+            target = x0
+        elif pred_type == "v":
+            shape = x0.shape
+            sqrt_alpha_bar_t = schedule.gather(schedule.sqrt_alphas_cumprod, t, shape)
+            sqrt_one_minus_alpha_bar_t = schedule.gather(
+                schedule.sqrt_one_minus_alphas_cumprod, t, shape
+            )
+            target = sqrt_alpha_bar_t * noise - sqrt_one_minus_alpha_bar_t * x0
 
         optimizer.zero_grad()
+        loss = F.mse_loss(pred, target)
         loss.backward()
         optimizer.step()
 
@@ -44,9 +55,9 @@ def train_one_epoch(model, train_loader, optimizer, schedule:DiffusionSchedule, 
     return epoch_loss
 
 @torch.no_grad()
-def sample_and_log(model, schedule, device, writer, global_step, num_samples=16, x_t=None):
+def sample_and_log(model, pred_type, schedule, device, writer, global_step, num_samples=16, x_t=None):
     model.eval()
-    x_0 = p_sample_loop(model, schedule, (num_samples, 3, 32, 32), device, x_t=x_t)
+    x_0 = p_sample_loop(model, schedule, pred_type, (num_samples, 3, 32, 32), device, x_t=x_t)
     x_0 = (x_0 + 1) / 2
     x_0.clamp_(0, 1)
     samples = torchvision.utils.make_grid(x_0, nrow=4)
@@ -60,15 +71,19 @@ def main():
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=3e-4)
+
     parser.add_argument("--T", type=int, default=200)
     parser.add_argument("--beta_start", type=float, default=1e-4)
     parser.add_argument("--beta_end", type=float, default=.02)
 
     parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--pred_type",type=str, default="eps",choices=["eps", "x0", "v"])
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--time_dim", type=int, default=128)
     parser.add_argument("--groups", type=int, default=8)
     parser.add_argument("--num_samples", type=int, default=16)
+    parser.add_argument("--use_attn", action='store_true', dest='use_attn')
+    parser.add_argument("--use_bottleneck_attn", action='store_true', dest='use_bottleneck_attn')
 
     parser.add_argument("--data-dir", type=str, default="./data")
     parser.add_argument("--log-dir", type=str, default="./runs/ddpm")
@@ -77,7 +92,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    model = UNet(args.channels, args.time_dim, args.groups).to(device)
+    model = UNet(args.channels, args.time_dim, args.groups, args.use_attn, args.use_bottleneck_attn).to(device)
     num_params = sum(p.numel() for p in model.parameters())
     print(model)
     print("Num Params: ", num_params)
@@ -99,7 +114,7 @@ def main():
     x_t = torch.randn((args.num_samples, 3, 32, 32), device=device)
 
     for epoch in range(args.epochs):
-        train_loss = train_one_epoch(model, train_loader, optimizer, schedule, device, writer, epoch)
+        train_loss = train_one_epoch(model, args.pred_type, train_loader, optimizer, schedule, device, writer, epoch)
         global_step = len(train_loader) * (epoch + 1) - 1
         writer.add_scalar("Epoch_Loss/train", train_loss, global_step)
 
@@ -108,7 +123,7 @@ def main():
             f"Train loss:{train_loss:.4f}",
         )
 
-        sample_and_log(model, schedule, device, writer, global_step, args.num_samples, x_t=x_t)
+        sample_and_log(model, args.pred_type, schedule, device, writer, global_step, args.num_samples, x_t=x_t)
 
     writer.close()
 
