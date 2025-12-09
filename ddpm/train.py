@@ -75,6 +75,7 @@ def main():
     parser.add_argument("--T", type=int, default=200)
     parser.add_argument("--beta_start", type=float, default=1e-4)
     parser.add_argument("--beta_end", type=float, default=.02)
+    parser.add_argument("--schedule_type", type=str, default='linear', choices=["linear", "cosine"])
 
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--pred_type",type=str, default="eps",choices=["eps", "x0", "v"])
@@ -98,7 +99,7 @@ def main():
     print("Num Params: ", num_params)
 
     train_loader, test_loader = get_dataloaders(args.batch_size, args.num_workers)
-    schedule = DiffusionSchedule(args.T, args.beta_start, args.beta_end, device)
+    schedule = DiffusionSchedule(args.T, args.beta_start, args.beta_end, device, args.schedule_type)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 

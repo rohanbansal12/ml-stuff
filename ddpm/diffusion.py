@@ -1,9 +1,26 @@
 import torch
+import math
 
 class DiffusionSchedule:
-    def __init__(self, T, beta_start, beta_end, device):
+    def __init__(self, T, beta_start, beta_end, device, schedule_type="linear", cosine_s=0.008):
         self.T = T
-        self.betas = torch.linspace(beta_start, beta_end, T, device=device)
+        self.device = device
+        self.schedule_type = schedule_type
+
+        if schedule_type == 'linear':
+            betas = torch.linspace(beta_start, beta_end, T, device=device)
+        elif schedule_type == 'cosine':
+            steps = T + 1
+            t = torch.linspace(0, T, steps, device=device) / T
+            f = torch.cos(((t + cosine_s) / (1 + cosine_s)) * math.pi / 2) ** 2
+            alpha_bar = f / f[0]
+            alphas = alpha_bar[1:] / alpha_bar[:-1]
+            betas = 1 - alphas
+            betas = betas.clamp(max=0.999)
+        else:
+            raise ValueError(f"Unknown schedule_type: {schedule_type}")
+
+        self.betas = betas
         self.alphas = 1 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
         self.alphas_cumprod_prev = torch.ones_like(self.alphas_cumprod)
