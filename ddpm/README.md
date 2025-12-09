@@ -14,7 +14,9 @@ Goals:
 - Run ablations on architecture and sampling choices
 
 Good intro blog post: [Lilian Weng Blog](https://lilianweng.github.io/posts/2021-07-11-diffusion-models/)
+
 DDPM paper: [DDPM Paper](https://arxiv.org/abs/2006.11239)
+
 ---
 
 ## 2. Diffusion Model Summary
