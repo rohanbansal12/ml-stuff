@@ -16,7 +16,7 @@ class DiffusionSchedule:
             alpha_bar = f / f[0]
             alphas = alpha_bar[1:] / alpha_bar[:-1]
             betas = 1 - alphas
-            betas = betas.clamp(max=0.999)
+            betas = betas.clamp(min=1e-8, max=beta_end) # ugly hack because with small T we have beta blowup and not enough training
         else:
             raise ValueError(f"Unknown schedule_type: {schedule_type}")
 
@@ -31,6 +31,8 @@ class DiffusionSchedule:
         self.sqrt_recip_alphas = 1 / torch.sqrt(self.alphas)
         self.posterior_variance = (1 - self.alphas_cumprod_prev) / (1 - self.alphas_cumprod) * self.betas
         self.posterior_variance.clamp_(min=1e-20)
+
+        print(schedule_type, T, betas[:5], betas[-5:])
 
     def sample_t(self, b, device):
         return torch.randint(0, self.T, (b,), device=device)
@@ -59,11 +61,13 @@ def p_sample_step(model, x_t, t_scalar, schedule: DiffusionSchedule, pred_type):
         eps_theta = (x_t - sqrt_alpha_bar_t * x0_pred) / sqrt_one_minus_alpha_bar_t
     elif pred_type == 'eps':
         eps_theta = model_out
-    else:
+    elif pred_type == 'v':
         sqrt_alpha_bar_t = schedule.gather(schedule.sqrt_alphas_cumprod, t, shape)
         sqrt_one_minus_alpha_bar_t = schedule.gather(schedule.sqrt_one_minus_alphas_cumprod, t, shape)
         v_pred = model_out
         eps_theta = sqrt_alpha_bar_t * v_pred + sqrt_one_minus_alpha_bar_t * x_t
+    else:
+        raise ValueError(f"Unknown prediction type: {pred_type}")
 
     recip_sqrt_alpha = schedule.gather(schedule.sqrt_recip_alphas, t, shape)
     betas = schedule.gather(schedule.betas, t, shape)

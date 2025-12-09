@@ -105,7 +105,7 @@ class MultiHeadAttention(nn.Module):
 
         # b, h, s, d_k -> b, h, s, s -> b, h, s, d_k
 
-            ## I wrote this from scratch attention computation for understanding and can verify it gives same result as the optimized torch version below
+            ## This is from scratch attention computation
             # scores = (Q @ K.transpose(-1, -2)) * (1.0 / math.sqrt(self.d_k))
             # if self.causal:
                 # scores = scores + self.causal_mask[:, :, :s, :s]

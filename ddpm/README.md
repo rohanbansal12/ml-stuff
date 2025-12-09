@@ -13,17 +13,19 @@ Goals:
 - Train DDPM on CIFAR-10 and generate samples
 - Run ablations on architecture and sampling choices
 
+Good intro blog post: [Lilian Weng Blog](https://lilianweng.github.io/posts/2021-07-11-diffusion-models/)
+DDPM paper: [DDPM Paper](https://arxiv.org/abs/2006.11239)
 ---
 
 ## 2. Diffusion Model Summary
 
-### Forward Process (q)
+### Forward Process ($q$)
 A fixed noise schedule gradually corrupts images:
 $q(x_t | x_{t-1}) = N(\sqrt{1 - \beta_t} * x_{t-1}, \beta_t * I)$
 
 We experiment with linear and cosine beta schedules.
 
-### Reverse Process (p_theta)
+### Reverse Process ($p_\theta$)
 The model predicts:
 - $\epsilon$ (default)
 - optionally: $x_0$ or $v$ (for ablations)
