@@ -40,7 +40,7 @@ class PolicyNet(nn.Module):
         action = dist.sample()
         
         # Return simple python item and the tensor log_prob for the graph
-        return action.item(), dist.log_prob(action)
+        return action.item(), dist.log_prob(action).squeeze(0)
     
 
 class ActorCriticNet(nn.Module):

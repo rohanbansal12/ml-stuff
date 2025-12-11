@@ -88,7 +88,7 @@ $V_\phi(s_t) \approx r_t + \gamma V_\phi(s_{t+1})$
 
 This is the basic idea behind actor-critic methods, where we use a value network to produce a baseline for the policy gradient.
 
-## GAE Progression
+### GAE Progression
 
 We have now shown that we have 2 extreme ways to estimate the advantage function:
 

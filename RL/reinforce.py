@@ -49,7 +49,7 @@ class ReinforceAgent:
 
     def update_policy(self, episode: Episode):
         rewards = episode.rewards
-        log_probs = torch.stack(episode.log_probs, dim=0)
+        log_probs = torch.stack(episode.log_probs, dim=0).squeeze(-1)
         returns = torch.tensor(self.compute_returns(rewards), device=self.device)
         if self.norm_returns:
             std, mean = torch.std_mean(returns)
