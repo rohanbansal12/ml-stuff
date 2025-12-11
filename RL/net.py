@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.distributions as distributions
+from torch.distributions.normal import Normal
 import numpy as np
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -11,32 +11,36 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class PolicyNet(nn.Module):
     def __init__(self, obs_dim, action_dim, hidden_sizes=(128, 128)):
         super().__init__()
-        in_dim = obs_dim
         layers = []
+        in_dim = obs_dim
         for h in hidden_sizes:
-            layers.append(nn.Linear(in_dim, h))
+            layers.append(layer_init(nn.Linear(in_dim, h)))
             layers.append(nn.ReLU())
             in_dim = h
         self.model = nn.Sequential(*layers)
+        
+        # Scale final layer for Max Entropy start (std=0.01)
         self.logits = nn.Linear(in_dim, action_dim)
 
     def forward(self, obs):
         x = self.model(obs)
         return self.logits(x)
     
-    def distribution(self, obs):
-        x = self(obs)
-        return torch.distributions.Categorical(logits=x)
-    
     def act(self, obs):
+        # Helper to get device
         device = next(self.parameters()).device
-        obs = torch.tensor(obs, device=device, dtype=torch.float32)
-        if obs.dim() == 1:
-            obs = obs.unsqueeze(0)
-
-        x = self.distribution(obs)
-        action = x.sample()
-        return action.item(), x.log_prob(action).squeeze()
+        obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32)
+        
+        # Handle single observation vs batch
+        if obs_t.dim() == 1:
+            obs_t = obs_t.unsqueeze(0)
+            
+        logits = self(obs_t)
+        dist = torch.distributions.Categorical(logits=logits)
+        action = dist.sample()
+        
+        # Return simple python item and the tensor log_prob for the graph
+        return action.item(), dist.log_prob(action)
     
 
 class ActorCriticNet(nn.Module):
@@ -70,6 +74,10 @@ class ActorCriticNet(nn.Module):
         
         return logits, value.squeeze(-1)
     
+    def get_value(self, x):
+        x = self.body(x)
+        return self.value(x)
+    
     def distribution(self, obs):
         logits, value = self(obs)
         dist = torch.distributions.Categorical(logits=logits)
@@ -91,78 +99,60 @@ class ActorCriticNet(nn.Module):
 
 
 class ContinuousPPONet(nn.Module):
-    def __init__(self, obs_dim, action_dim, hidden_sizes=(128, 128)):
+    def __init__(self, obs_dim, action_dim, hidden_sizes=(64, 64)):
         super().__init__()
         
-        # --- Critic ---
+        # --- Critic (Value) ---
         critic_layers = []
         in_dim = obs_dim
         for h in hidden_sizes:
             critic_layers.append(layer_init(nn.Linear(in_dim, h)))
             critic_layers.append(nn.Tanh())
             in_dim = h
-        # Critic output layer scaled to 1.0
         critic_layers.append(layer_init(nn.Linear(in_dim, 1), std=1.0))
         self.critic = nn.Sequential(*critic_layers)
 
-        # --- Actor ---
+        # --- Actor (Mean) ---
         actor_layers = []
         in_dim = obs_dim
         for h in hidden_sizes:
             actor_layers.append(layer_init(nn.Linear(in_dim, h)))
             actor_layers.append(nn.Tanh()) 
             in_dim = h
-        # Actor output layer scaled to 0.01 -> starts with near-zero actions
+        # Initialize mean output with very small weights (std=0.01)
         actor_layers.append(layer_init(nn.Linear(in_dim, action_dim), std=0.01))
-        self.actor = nn.Sequential(*actor_layers)
+        self.actor_mean = nn.Sequential(*actor_layers)
 
-        # State-independent log std
-        self.log_std = nn.Parameter(torch.zeros(action_dim))
+        # --- Actor (Log Std) ---
+        # Learnable parameter, state-independent
+        self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim))
 
-    def forward(self, obs):
-        if obs.dim() == 1:
-            obs = obs.unsqueeze(0)
+    def get_value(self, x):
+        return self.critic(x)
 
-        mu = self.actor(obs)
-        value = self.critic(obs).squeeze(-1)
-        return mu, self.log_std, value
-
-    def get_distribution(self, obs):
-        mu = self.actor(obs)
-        std = torch.exp(self.log_std)
-        base_dist = distributions.Normal(mu, std)
+    def get_action_and_value(self, x, action=None):
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
         
-        # Apply the Tanh transformation
-        # caching ensures we don't recompute the transform when getting log_probs later
-        transforms = [distributions.transforms.TanhTransform(cache_size=1)]
-        dist = distributions.TransformedDistribution(base_dist, transforms)
+        probs = Normal(action_mean, action_std)
         
-        return dist
+        if action is None:
+            action = probs.sample()
+            
+        log_prob = probs.log_prob(action).sum(1)
+        entropy = probs.entropy().sum(1)
+        value = self.critic(x)
+        
+        return action, log_prob, entropy, value
+
+    def forward(self, x, action=None):
+        return self.get_action_and_value(x, action)
 
     def act(self, obs):
-        device = next(self.parameters()).device
-        with torch.no_grad():
-            # Convert to tensor and fix dimensions
-            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device)
-            if obs_t.dim() == 1:
-                obs_t = obs_t.unsqueeze(0)
-
-            # Get distribution and value
-            dist = self.get_distribution(obs_t)
-            value = self.critic(obs_t).squeeze(-1)
-
-            action = dist.sample()
-            log_prob = dist.log_prob(action).sum(-1)
-
-            return (
-                action.cpu().numpy()[0], 
-                log_prob.cpu().numpy()[0], 
-                value.cpu().numpy()[0]
-            )
+        action, log_prob, _, value = self.get_action_and_value(obs)
+        return action, log_prob, value.squeeze(-1)
 
     def evaluate_actions(self, obs, actions):
-        dist = self.get_distribution(obs)
-        value = self.critic(obs).squeeze(-1)
-        log_probs = dist.log_prob(actions).sum(-1)
-        entropy = dist.base_dist.entropy().sum(-1)
-        return log_probs, entropy, value
+        _, log_prob, entropy, value = self.get_action_and_value(obs, actions)
+        return log_prob, entropy, value.squeeze(-1)

@@ -53,7 +53,7 @@ class ReinforceAgent:
         returns = torch.tensor(self.compute_returns(rewards), device=self.device)
         if self.norm_returns:
             std, mean = torch.std_mean(returns)
-            returns = (returns - mean) / std
+            returns = (returns - mean) / (std + 1e-9)
         loss = (-log_probs * returns).mean()
         self.optimizer.zero_grad()
         loss.backward()
@@ -70,6 +70,9 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
+
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision('high')
 
     env_name = "CartPole-v1"
     env = gym.make(env_name)
