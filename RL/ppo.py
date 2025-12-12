@@ -55,7 +55,6 @@ class PPOAgent:
 
     def update_parameters(self, buffer: RolloutBuffer):
         # 1. Get all data (Flattened)
-        # These are now 1D tensors of size (steps * num_envs)
         obs, actions, log_probs, values, advantages, returns, dones = buffer.get()
 
         # 2. Normalize Advantages (Crucial Step)
@@ -65,7 +64,6 @@ class PPOAgent:
             advantages = (advantages - adv_mean) / (adv_std + 1e-8)
 
         # 3. Prepare for Mini-batching
-        # We know the total batch size now
         batch_size = obs.shape[0] 
         minibatch_size = batch_size // self.config.num_minibatches
         
@@ -97,7 +95,6 @@ class PPOAgent:
                 advantages_mb = advantages[mb_inds] # These are now CORRECTLY normalized
                 returns_mb = returns[mb_inds]
 
-                # --- The rest is identical to your original PPO logic ---
                 new_log_probs, entropy, new_values = self.actor_critic.evaluate_actions(obs_mb, actions_mb)
 
                 approx_kl = torch.mean(old_log_probs_mb - new_log_probs).item()
@@ -109,9 +106,6 @@ class PPOAgent:
                 
                 policy_loss = -torch.min(clipped, unclipped).mean()
 
-                # Value Loss (Optional Clipping)
-                # Note: I'm assuming you fixed the value clipping issue we discussed earlier
-                # by either setting large epsilon or using unclipped loss
                 value_loss = 0.5 * ((new_values - returns_mb) ** 2).mean()
 
                 entropy_loss = entropy.mean()
@@ -195,7 +189,7 @@ def main():
     from gymnasium.vector import SyncVectorEnv
 
     def make_env():
-        env = gym.make(args.env_name)
+        env = gym.make(args.env_name, max_episode_steps=500)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         return env
 

@@ -80,7 +80,7 @@ class ResNet(nn.Module):
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
-    def forward(self, x):
+    def forward(self, x, feat_vec=False):
         out = self.relu(self.bn1(self.conv1(x)))
 
         out = self.layer1(out)
@@ -90,6 +90,8 @@ class ResNet(nn.Module):
 
         out = self.avg_pool(out)
         out = torch.flatten(out, 1)
+        if feat_vec:
+            return out
         return self.fc(out)
 
     def _make_layer(self, block, out_channels, blocks, stride):
