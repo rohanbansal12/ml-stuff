@@ -5,6 +5,8 @@ import gymnasium as gym
 from dataclasses import dataclass, field
 import argparse
 from net import PolicyNet
+from torch.utils.tensorboard import SummaryWriter
+import os
 
 @dataclass
 class Episode:
@@ -66,6 +68,7 @@ def main():
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--norm_returns", action='store_true', dest='norm_returns')
     parser.add_argument("--num_episodes", type=int, default=2000)
+    parser.add_argument("--log-dir", type=str, default="./runs")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -81,6 +84,12 @@ def main():
     hidden_sizes = (128, 128)
 
     agent = ReinforceAgent(obs_dim, action_dim, hidden_sizes, gamma=args.gamma, lr=args.lr, device=device, norm_returns=args.norm_returns)
+
+    run_name = f"reinforce_lr={args.lr}_gamma={args.gamma}"
+    tb_logdir = os.path.join(args.log_dir, run_name)
+    writer = SummaryWriter(log_dir=tb_logdir)
+    
+    writer.add_text("hparams", str(vars(args)))
 
     print("\n=== REINFORCE Training Configuration ===")
     print(f"Environment:          {env_name}")
@@ -113,6 +122,8 @@ def main():
                 f"Return: {ret:.2f} | "
                 f"Avg Return (last {len(recent)}): {avg_return:.2f}"
             )
+            writer.add_scalar("Loss", loss, idx+1)
+            writer.add_scalar("Avg_ret", avg_return, idx+1)
 
     env.close()
     

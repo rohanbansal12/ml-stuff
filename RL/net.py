@@ -97,62 +97,69 @@ class ActorCriticNet(nn.Module):
         entropy = dist.entropy()
         return log_probs, entropy, values
 
-
-class ContinuousPPONet(nn.Module):
+class PPONet(nn.Module):
     def __init__(self, obs_dim, action_dim, hidden_sizes=(64, 64)):
         super().__init__()
-        
-        # --- Critic (Value) ---
-        critic_layers = []
-        in_dim = obs_dim
-        for h in hidden_sizes:
-            critic_layers.append(layer_init(nn.Linear(in_dim, h)))
-            critic_layers.append(nn.Tanh())
-            in_dim = h
-        critic_layers.append(layer_init(nn.Linear(in_dim, 1), std=1.0))
-        self.critic = nn.Sequential(*critic_layers)
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(obs_dim, hidden_sizes[0])),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_sizes[0], hidden_sizes[1])),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_sizes[1], 1), std=1.0),
+        )
+        self.actor = nn.Sequential(
+            layer_init(nn.Linear(obs_dim, hidden_sizes[0])),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_sizes[0], hidden_sizes[1])),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_sizes[0], action_dim), std=0.01),
+        )
 
-        # --- Actor (Mean) ---
-        actor_layers = []
-        in_dim = obs_dim
-        for h in hidden_sizes:
-            actor_layers.append(layer_init(nn.Linear(in_dim, h)))
-            actor_layers.append(nn.Tanh()) 
-            in_dim = h
-        # Initialize mean output with very small weights (std=0.01)
-        actor_layers.append(layer_init(nn.Linear(in_dim, action_dim), std=0.01))
-        self.actor_mean = nn.Sequential(*actor_layers)
+    def get_value(self, x):
+        return self.critic(x)
 
-        # --- Actor (Log Std) ---
-        # Learnable parameter, state-independent
+    def get_action_and_value(self, x, action=None):
+        logits = self.actor(x)
+        probs = torch.distributions.Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+    
+
+class ContinuousRPONet(nn.Module):
+    def __init__(self, obs_dim, action_dim, hidden_sizes=(64, 64), rpo_alpha=0.5):
+        super().__init__()
+        self.rpo_alpha = rpo_alpha
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(obs_dim, hidden_sizes[0])),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_sizes[0], hidden_sizes[1])),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_sizes[1], 1), std=1.0),
+        )
+        self.actor_mean = nn.Sequential(
+            layer_init(nn.Linear(obs_dim, hidden_sizes[0])),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_sizes[0], hidden_sizes[1])),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_sizes[0], action_dim), std=0.01),
+        )
         self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim))
 
     def get_value(self, x):
         return self.critic(x)
 
     def get_action_and_value(self, x, action=None):
+        device = next(self.parameters()).device
         action_mean = self.actor_mean(x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
-        
         probs = Normal(action_mean, action_std)
-        
         if action is None:
             action = probs.sample()
-            
-        log_prob = probs.log_prob(action).sum(1)
-        entropy = probs.entropy().sum(1)
-        value = self.critic(x)
-        
-        return action, log_prob, entropy, value
+        else:  # new to RPO
+            z = torch.FloatTensor(action_mean.shape).uniform_(-self.rpo_alpha, self.rpo_alpha).to(device)
+            action_mean = action_mean + z
+            probs = Normal(action_mean, action_std)
 
-    def forward(self, x, action=None):
-        return self.get_action_and_value(x, action)
-
-    def act(self, obs):
-        action, log_prob, _, value = self.get_action_and_value(obs)
-        return action, log_prob, value.squeeze(-1)
-
-    def evaluate_actions(self, obs, actions):
-        _, log_prob, entropy, value = self.get_action_and_value(obs, actions)
-        return log_prob, entropy, value.squeeze(-1)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)

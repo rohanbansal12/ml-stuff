@@ -7,6 +7,8 @@ from net import ActorCriticNet
 from util import RolloutBuffer
 import argparse
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
+import os
 
 class ActorCriticAgent:
     def __init__(self,
@@ -130,7 +132,7 @@ def main():
     # Training duration
     parser.add_argument("--total_updates", type=int, default=15000, help="Number of A2C updates")
     parser.add_argument("--rollout_size", type=int, default=80, help="Total steps per update (across all envs)")
-    
+    parser.add_argument("--log-dir", type=str, default="./runs")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -182,6 +184,13 @@ def main():
         cont=False
     )
 
+    run_name = f"a2c_lr={args.lr}_gamma={args.gamma}_lam={args.lam}"
+    tb_logdir = os.path.join(args.log_dir, run_name)
+    writer = SummaryWriter(log_dir=tb_logdir)
+    
+    writer.add_text("hparams", str(vars(args)))
+
+
     print("\n=== A2C Parallel Experiment Configuration ===")
     print(f"Environment:           {env_name}")
     print(f"Num Envs:              {num_envs}")
@@ -223,6 +232,9 @@ def main():
                 f"Loss: {optim_logs['loss']:.4f} | "
                 f"Ent: {optim_logs['entropy']:.4f} "
             )
+            writer.add_scalar("Loss", optim_logs['loss'], idx+1)
+            writer.add_scalar("Avg_ret", avg_return, idx+1)
+            writer.add_scalar("Entropy", optim_logs['entropy'], idx+1)
 
     env.close()
 

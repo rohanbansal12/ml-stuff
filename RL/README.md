@@ -57,8 +57,8 @@ Properties:
 - Learning is noisy  
 - Often collapses unless LR carefully tuned  
 - For simple CartPole, it works reasonably well
-    - Reaches a max of around 480 in ~500 episodes and is able to maintain performance above 460 for a while.
-
+    - Reaches an average return of 500 in around 250 episodes and training is quite stable for chosen hyperparameters
+    - After a bit, it then crashes and seems to oscillate for a while before getting back to 500 again
 ---
 
 
@@ -130,3 +130,68 @@ $L_H = \beta H(\pi)$
 
 - CartPole is so simple that A2C isn't particularly better than REINFORCE
 - Took a lot of config tweaking to get it to work well (not too slow but not unstable/crashing)
+    - Sensitive to learning rate, lambda/gamma, model initialization (orthogonal better than xavier)
+    - Reached max average return of 500 multiple times (earliest at 8500 rollouts) although sometimes crashes and "learns again"
+
+---
+
+# 5. Stage 3 — Proximal Policy Optimization (PPO)
+
+### Mathematical Background
+
+One thing worth noting about Actor-Critic is that it is incredibly sample inefficient. For each trajectory (or partial rollout) we collect, we only do a single policy and value update. Occasionally, we may try to run multiple updates on a single batch of data, however this often leads to divergence as the policy changes too much from the data it was collected on (called **off-policy** data).
+
+To remedy this, we will convert our gradient expectation (which should use new policy $\pi_\theta$) to use the old policy $\pi_{\theta_{old}}$ that generated the data. This is done via **importance sampling**:
+
+$$g(\theta) = \mathbb{E}_{\pi_{\theta_{old}}} \big[ \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{old}}(a_t|s_t)} \nabla_\theta \log \pi_\theta(a_t|s_t) A_t \big] = \mathbb{E}_{\pi_{\theta_{old}}}\big[r_t(\theta)A_t \nabla_\theta \log \pi_\theta(a_t|s_t)\big] = \mathbb{E}_{\pi_{\theta_{old}}}\big[A_t \nabla_\theta r_t(\theta)\big]$$
+
+This gradient makes it immediately clear that we can instead use an objective function:
+
+$$L(\theta) = \mathbb{E}_{\pi_{\theta_{old}}} \big[r_t(\theta) A_t \big]$$
+
+in which we can use the same sample multiple times because the trajectory is still generated from the old policy which makes this expectation valid.
+
+PPO also implements a **clipped surrogate objective** to prevent large policy updates that could destabilize training. This is done by clipping the importance sampling ratio $r_t(\theta)$ within a small range around 1 (e.g., [0.8, 1.2]):
+
+$r_t^{clipped}(\theta) = \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)$
+
+This is done because for positive advantages and large $r_t$, the gradient can push us into very greedy policies that overfit to the current batch of data and for negative advantages and small $r_t$, the gradient can push us into very conservative policies by avoiding certain actions altogether. Clipping prevents these extreme updates and keeps the policy changes more stable. 
+
+PPO will combine the results to choose the minimum of the unclipped and clipped objectives:
+
+$L^{PPO}(\theta) = \mathbb{E}_{\pi_{\theta_{old}}} \big[ \min(r_t(\theta) A_t, r_t^{clipped}(\theta) A_t) \big]$
+
+Similar to A2C, we will still keep the value loss and entropy bonus:
+
+$L_V = (V(s_t) - R_t)^2$
+
+$L_H = \beta H(\pi)$
+
+### Implementation Details
+
+- Collect rollout buffer for several episodes  
+- Compute advantages via GAE  
+- Shuffle + minibatch SGD updates  
+- Use old policy for ratio r_t  
+- Target KL checked optionally for early stopping  
+
+### Benefits Over Actor-Critic
+
+- More stable training and often more monotonic improvements
+- Generally, much better sample efficiency  
+- Consistent performance across seeds
+- Generally more robust to hyperparameters
+
+### Observations
+
+- It did seem that PPO was less sensitive to hyperparams, however model initialization still seemed to be very important
+    - I also found that having an entirely separate critic network (not shared) helped a lot with performance for PPO whereas A2C seemed to work fine with a shared network
+- Training was generally quite monotonic and we reached a consistent 490 reward in about 300 rollouts demonstrating good sample efficiency. It does take a while to actually hit the 500 reward exactly over many espisodes, but it gets very close quite quickly which is often more important for general RL tasks.
+
+---
+
+### Continuous PPO
+
+I also implemented a continuous version of PPO to solve "Pendulum-v1". The primary change is that our model now outputs a mean and a log stdev which are used to sample from a Normal distribution. Modern implementations seem to use state-specific stddevs and tanh squashing + Jacobian correction to ensure that actions remain in bounds and our log-probs are appropriately adjusted, however I just used a naive clipping approach for simplicity. Ironically, it seems after some research that PPO continuous is not able to consistently solve Pendulum-v1 because it locks onto a suboptimal policy and then aggressively scales down action variance. The solution, however, is quite simple--a model called RPO which adds a constant factor the action mean prior to Normal sampling to ensure persistent exploration.
+
+After implementing this, I was able to get a fairly stable and robust training setup (the full hyperparameters can be seen in the code), but the average return got to around -150 in around 90 outer updates and the model was able to maintain performance around this range through the end of training. Pendulum-v1 typically starts with a return of around -1400 and is considered "solved" at around -200 with the return always being negative.
