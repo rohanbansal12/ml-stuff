@@ -195,3 +195,154 @@ $L_H = \beta H(\pi)$
 I also implemented a continuous version of PPO to solve "Pendulum-v1". The primary change is that our model now outputs a mean and a log stdev which are used to sample from a Normal distribution. Modern implementations seem to use state-specific stddevs and tanh squashing + Jacobian correction to ensure that actions remain in bounds and our log-probs are appropriately adjusted, however I just used a naive clipping approach for simplicity. Ironically, it seems after some research that PPO continuous is not able to consistently solve Pendulum-v1 because it locks onto a suboptimal policy and then aggressively scales down action variance. The solution, however, is quite simple--a model called RPO which adds a constant factor the action mean prior to Normal sampling to ensure persistent exploration.
 
 After implementing this, I was able to get a fairly stable and robust training setup (the full hyperparameters can be seen in the code), but the average return got to around -150 in around 90 outer updates and the model was able to maintain performance around this range through the end of training. Pendulum-v1 typically starts with a return of around -1400 and is considered "solved" at around -200 with the return always being negative.
+
+# 6. Stage 4 — Soft Actor-Critic (SAC)
+
+Soft Actor-Critic (SAC) is an **off-policy** actor-critic algorithm primarily designed for **continuous control**. It combines:
+
+- A **stochastic policy** trained via the reparameterization trick  
+- **Double Q-learning** to reduce overestimation bias  
+- A **maximum-entropy objective** to encourage exploration  
+- A **replay buffer** for high sample efficiency  
+- **Target networks** updated via Polyak averaging for stability  
+
+Compared to PPO, SAC trades on-policy stability for **off-policy efficiency and robustness** in continuous domains.
+
+
+## Mathematical Background
+
+### Maximum-Entropy Objective
+
+Instead of maximizing expected return alone, SAC maximizes a **soft** objective that includes an entropy bonus:
+
+$J(\pi) = \mathbb{E}\left[\sum_{t=0}^{\infty} \gamma^t \left(r(s_t,a_t) + \alpha \mathcal{H}(\pi(\cdot|s_t))\right)\right]$
+
+where the policy entropy is defined as:
+
+$\mathcal{H}(\pi(\cdot|s)) = -\mathbb{E}_{a\sim\pi(\cdot|s)}[\log \pi(a|s)]$
+
+Equivalently, when sampling $a_t \sim \pi(\cdot|s_t)$, the per-step objective becomes:
+
+$r(s_t,a_t) - \alpha \log \pi(a_t|s_t)$
+
+The temperature parameter $\alpha > 0$ controls the tradeoff between exploration and exploitation.
+
+---
+
+### Soft Value Functions
+
+Define the **soft Q-function** as:
+
+$Q^\pi(s,a) = \mathbb{E}\left[\sum_{k=0}^{\infty} \gamma^k \left(r_{t+k} - \alpha \log \pi(a_{t+k}|s_{t+k})\right)\,\middle|\,s_t=s, a_t=a\right]$
+
+Define the **soft value function** as:
+
+$V^\pi(s) = \mathbb{E}_{a\sim\pi}\left[Q^\pi(s,a) - \alpha \log \pi(a|s)\right]$
+
+These satisfy the **soft Bellman equation**:
+
+$Q^\pi(s,a) = r(s,a) + \gamma \mathbb{E}_{s'}[V^\pi(s')]$
+
+Substituting $V^\pi$ gives:
+
+$Q^\pi(s,a) = r(s,a) + \gamma \mathbb{E}_{s',a'\sim\pi}\left[Q^\pi(s',a') - \alpha \log \pi(a'|s')\right]$
+
+---
+
+### Critic Learning (Soft Policy Evaluation)
+
+SAC approximates $Q^\pi$ using two critics $Q_{\phi_1}, Q_{\phi_2}$ and corresponding target networks $Q_{\phi_1'}, Q_{\phi_2'}$.
+
+Given a replay transition $(s,a,r,s',d)$, we sample $a' \sim \pi_\theta(\cdot|s')$ and compute the TD target:
+
+$y = r + \gamma (1-d) \left(\min(Q_{\phi_1'}(s',a'), Q_{\phi_2'}(s',a')) - \alpha \log \pi_\theta(a'|s')\right)$
+
+Each critic minimizes the mean-squared TD error:
+
+$\mathcal{L}_{Q_i} = \mathbb{E}\left[(Q_{\phi_i}(s,a) - y)^2\right], \quad i \in \{1,2\}$
+
+Using the minimum over critics reduces overestimation bias and improves stability.
+
+---
+
+### Actor Learning (Soft Policy Improvement)
+
+The optimal maximum-entropy policy satisfies:
+
+$\pi^*(\cdot|s) \propto \exp\left(\frac{1}{\alpha} Q^*(s,\cdot)\right)$
+
+Instead of solving this directly, SAC performs gradient descent on the policy parameters $\theta$ using the objective:
+
+$\mathcal{L}_\pi(\theta) = \mathbb{E}_{s\sim\mathcal{D},\,a\sim\pi_\theta}\left[\alpha \log \pi_\theta(a|s) - \min(Q_{\phi_1}(s,a), Q_{\phi_2}(s,a))\right]$
+
+The $Q$-term encourages high-value actions, while the entropy term prevents premature policy collapse.
+
+---
+
+### Stochastic Policy and Reparameterization
+
+For continuous control, SAC uses a Gaussian policy with tanh squashing:
+
+$u \sim \mathcal{N}(\mu_\theta(s), \sigma_\theta(s)), \qquad a = \tanh(u)$
+
+Sampling uses the reparameterization trick so gradients can flow through the sampled action.
+
+#### Tanh Squashing Log-Probability Correction
+
+Since $a = \tanh(u)$ is a change of variables, the log-probability must be corrected:
+
+$\log \pi_\theta(a|s) = \log \mathcal{N}(u;\mu_\theta(s),\sigma_\theta(s)) - \sum_j \log\left(1 - \tanh^2(u_j)\right)$
+
+This correction is critical for correct entropy estimation and stable learning.
+
+Actions are typically rescaled affinely to match environment bounds; this contributes only a constant Jacobian term and is often omitted from optimization.
+
+---
+
+### Entropy Temperature Autotuning
+
+Rather than fixing $\alpha$, SAC automatically tunes it to maintain a target entropy:
+
+$\mathcal{H}_{\text{target}} \approx -\text{action\_dim}$
+
+The temperature parameter is optimized via:
+
+$\mathcal{L}_\alpha = -\mathbb{E}\left[\log \alpha \left(\log \pi_\theta(a|s) + \mathcal{H}_{\text{target}}\right)\right]$
+
+This keeps the policy sufficiently stochastic early in training and nearly deterministic at convergence.
+
+---
+
+### Target Networks and Polyak Averaging
+
+To stabilize bootstrapped Q-learning, SAC uses slowly updated target networks:
+
+$\phi_i' \leftarrow \tau \phi_i + (1 - \tau) \phi_i'$
+
+with $\tau \ll 1$ (e.g., $0.005$).
+
+
+## Implementation Details
+
+- Off-policy learning using a replay buffer storing $(s,a,r,s',done)$  
+- Two critics and two target critics  
+- Squashed Gaussian actor with reparameterized sampling  
+- Losses:
+  - Critic: soft TD error  
+  - Actor: entropy-regularized policy loss  
+  - Alpha: entropy-matching objective  
+- Target networks updated via Polyak averaging  
+
+
+## Benefits Over PPO
+
+- Much better sample efficiency due to off-policy learning  
+- Stronger and more stable exploration via entropy maximization  
+- Particularly effective for continuous control tasks (Pendulum, MuJoCo)  
+
+
+## Observations
+
+- Pendulum-v1 typically starts around $-1200$ return  
+- SAC reliably reaches around $-200$ (considered solved) and often $-150$ or better  
+- Correct tanh log-prob correction and done handling are essential for success

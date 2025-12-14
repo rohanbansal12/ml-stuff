@@ -22,6 +22,46 @@ class PPOConfig:
     seed: int = 1
     rpo_alpha: float = 0.5
 
+class ReplayBuffer:
+    def __init__(self, buffer_size, num_envs, obs_dim, act_dim, device="cpu"):
+        self.buffer_size = max(buffer_size // num_envs, 1)
+        self.observations = torch.zeros((self.buffer_size, num_envs, obs_dim), device=device)
+        self.next_observations = torch.zeros((self.buffer_size, num_envs, obs_dim), device=device)
+        self.actions = torch.zeros((self.buffer_size, num_envs, act_dim), device=device)
+        self.rewards = torch.zeros((self.buffer_size, num_envs), device=device)
+        self.dones = torch.zeros((self.buffer_size, num_envs), device=device)
+
+        self.device = device
+        self.n_envs = num_envs
+    
+        self.ptr = 0
+        self.full = False
+
+    def store(self, obs, next_obs, action, reward, done):
+        self.observations[self.ptr] = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
+        self.next_observations[self.ptr] = torch.as_tensor(next_obs, device=self.device, dtype=torch.float32)
+        self.actions[self.ptr] = torch.as_tensor(action, device=self.device, dtype=torch.float32)
+        self.rewards[self.ptr] = torch.as_tensor(reward, device=self.device, dtype=torch.float32)
+        self.dones[self.ptr] = torch.as_tensor(done, device=self.device, dtype=torch.float32)
+
+        self.ptr += 1
+        if self.ptr == self.buffer_size:
+            self.full = True
+            self.ptr = 0
+
+    def sample(self, batch_size, device='cpu'):
+        batch_idx = torch.randint(low=0, high=self.buffer_size if self.full else self.ptr, size=(batch_size,), device=self.device)
+        env_idx = torch.randint(low=0, high=self.n_envs, size=(batch_idx.size(0),), device=self.device)
+
+        s_obs = self.observations[batch_idx, env_idx].to(device)
+        s_next_obs = self.next_observations[batch_idx, env_idx].to(device)
+        s_actions = self.actions[batch_idx, env_idx].to(device)
+        s_rewards = self.rewards[batch_idx, env_idx].unsqueeze(-1).to(device)
+        s_dones = self.dones[batch_idx, env_idx].unsqueeze(-1).to(device)
+
+        return s_obs, s_next_obs, s_actions, s_rewards, s_dones
+
+
 class RolloutBuffer:
     def __init__(self, steps, num_envs, obs_dim, device, act_dim=0, cont=False):
         # We add num_envs to the shape initialization

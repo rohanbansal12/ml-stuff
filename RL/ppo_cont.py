@@ -1,12 +1,10 @@
 import torch
-from dataclasses import dataclass, field
 import argparse
 import gymnasium as gym
 from net import ContinuousRPONet
 from util import RolloutBuffer, PPOConfig, PPOAgent
 import numpy as np
-import gymnasium as gym
-import time
+import random
     
 def main():
     parser = argparse.ArgumentParser()
@@ -44,6 +42,10 @@ def main():
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
     args.num_updates = args.total_timesteps // args.batch_size
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")

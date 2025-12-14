@@ -163,3 +163,62 @@ class ContinuousRPONet(nn.Module):
             probs = Normal(action_mean, action_std)
 
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+    
+class SoftCriticNet(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden_sizes=(64, 64)):
+        super().__init__()
+
+        self.model = nn.Sequential(
+            nn.Linear(obs_dim + act_dim, hidden_sizes[0]),
+            nn.ReLU(),
+            nn.Linear(hidden_sizes[0], hidden_sizes[1]),
+            nn.ReLU(),
+            nn.Linear(hidden_sizes[1], 1)
+        )
+
+    def forward(self, x, a):
+        x = torch.cat([x, a], dim=1)
+        return self.model(x)
+    
+class SoftActorNet(nn.Module):
+    def __init__(self, obs_dim, act_dim, action_space, hidden_sizes=(64, 64), log_std_min=-5, log_std_max=2):
+        super().__init__()
+
+        self.body = nn.Sequential(
+            nn.Linear(obs_dim, hidden_sizes[0]),
+            nn.ReLU(),
+            nn.Linear(hidden_sizes[0], hidden_sizes[1]),
+            nn.ReLU()
+        )
+        self.mean_head = nn.Linear(hidden_sizes[1], act_dim)
+        self.log_std_head = nn.Linear(hidden_sizes[1], act_dim)
+
+        low, high = action_space
+        self.register_buffer(
+            "action_scale", torch.tensor((high - low) / 2.0, dtype=torch.float32)
+        )
+        self.register_buffer(
+            "action_bias", torch.tensor((high + low) / 2.0, dtype=torch.float32)
+        )
+        self.log_std_min = log_std_min
+        self.log_std_max = log_std_max
+
+    def forward(self, x):
+        x = self.body(x)
+        mu = self.mean_head(x)
+        log_std = self.log_std_head(x)
+        log_std = torch.tanh(log_std)
+        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1)
+
+        return mu, log_std.exp()
+    
+    def get_action(self, x):
+        mu, std = self(x)
+        norm = torch.distributions.Normal(mu, std)
+        raw = norm.rsample()
+        raw_th = torch.tanh(raw)
+        action = raw_th * self.action_scale + self.action_bias
+
+        log_prob = norm.log_prob(raw).sum(-1)
+        log_prob -= torch.log(1 - raw_th.square() + 1e-6).sum(-1)
+        return action, log_prob.unsqueeze(-1)
