@@ -290,6 +290,77 @@ class QuantLinearW8A8StaticAct(nn.Module):
             return y, x_clip
         return y
 
+def group_weights(W: torch.Tensor, group_size: int):
+    assert W.size(1) % group_size == 0
+    n_groups = W.size(1) // group_size
+    return W.reshape((W.size(0), n_groups, group_size))
+
+def calc_group_scales(W_grouped: torch.Tensor, qmax=7, eps=1e-8):
+    amax = W_grouped.abs().amax(dim=-1, keepdim=True)
+    s_w = torch.clamp(amax / qmax, min=eps)
+    return s_w
+
+def quantize_grouped(W_grouped: torch.Tensor, s_w: torch.Tensor, qmin:int, qmax:int):
+    q = torch.round(W_grouped / s_w)
+    q = torch.clamp(q, min=qmin, max=qmax)
+    return q.to(torch.int8)
+
+class QuantLinearW4Grouped(nn.Module):
+    def __init__(self, in_features: int, out_features: int, has_bias: bool, group_size: int):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+
+        assert in_features % group_size == 0
+        n_groups = in_features // group_size
+        self.group_size = group_size
+        self.n_groups = n_groups
+
+        self.register_buffer("w_q", torch.empty((out_features, n_groups, group_size), dtype=torch.int8), persistent=True)
+        self.register_buffer("s_w", torch.empty((n_groups, out_features), dtype=torch.float32), persistent=True)
+
+        self.register_buffer("has_bias", torch.tensor(int(has_bias), dtype=torch.uint8), persistent=True)
+        self.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.float32))
+
+    @classmethod
+    def from_float(cls, layer: nn.Linear, group_size: int):
+        out_f, in_f = layer.out_features, layer.in_features
+        has_bias = layer.bias is not None
+
+        q = cls(in_features=in_f, out_features=out_f, has_bias=has_bias, group_size=group_size).to(layer.weight.device)
+
+        # weights: symmetric per-output-channel
+        w_g = group_weights(layer.weight, group_size)
+        s_w = calc_group_scales(w_g, qmax=7)
+        w_q = quantize_grouped(w_g, s_w, qmin=-7, qmax=7)
+
+        q.w_q.copy_(w_q.contiguous())
+        q.s_w.copy_(s_w.to(torch.float32).contiguous().squeeze(-1).T)
+
+        if has_bias:
+            q.bias.data.copy_(layer.bias.detach().to(torch.float32))
+        else:
+            q.bias.data.zero_()
+
+        return q
+    
+    def forward(self, x: torch.Tensor):
+        orig_dtype = x.dtype
+        prefix = x.shape[:-1]
+        x = x.flatten(start_dim=0, end_dim=-2)
+        x = x.view((x.size(0), self.n_groups, self.group_size))
+
+        x_f = x.float()
+        w_f = self.w_q.float()
+        y_g = torch.einsum("n g k, o g k -> n g o", x_f, w_f)
+        y_g = y_g * self.s_w.unsqueeze(0)
+        y = y_g.sum(dim=1)
+
+        if bool(self.has_bias.item()):
+            y = y + self.bias.to(y.dtype)
+
+        return y.reshape((*prefix, self.out_features)).to(orig_dtype)
+
 def set_module_by_name(root, dotted_name, new_module):
     parts = dotted_name.split(".")
     parent = root
@@ -344,6 +415,9 @@ def main():
     split = int(0.9 * len(tokens))
     val_tokens = tokens[split:]
 
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
     full_eval_data = []
     for batch in range(EVALUATION_BATCHES):
         x, y = get_batch(val_tokens, BATCH_SIZE, MAX_SEQ_LEN, device)
