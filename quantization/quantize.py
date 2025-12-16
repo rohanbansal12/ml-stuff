@@ -37,31 +37,34 @@ def _reduce_percentile(
     """
     Percentile-based range. For asymmetric: [q_low, q_high] = [1-p, p].
     For symmetric: use max(|q|) based on percentile of abs(x).
+
+    Note: torch.quantile requires float32/float64, so we compute quantiles in fp32.
     """
     if not (0.0 < p <= 1.0):
         raise ValueError("p must be in (0, 1], e.g. 0.999 for 99.9%")
 
+    x_fp = x.float()  # quantile requires float/double
+
     if not per_channel:
         if symmetric:
-            a = torch.quantile(x.abs().flatten(), p)
+            a = torch.quantile(x_fp.abs().flatten(), p).to(x.dtype)
             return -a, a
-        lo = torch.quantile(x.flatten(), 1.0 - p)
-        hi = torch.quantile(x.flatten(), p)
+        lo = torch.quantile(x_fp.flatten(), 1.0 - p).to(x.dtype)
+        hi = torch.quantile(x_fp.flatten(), p).to(x.dtype)
         return lo, hi
 
     if axis is None:
         raise ValueError("axis must be provided when per_channel=True")
 
     axis = axis % x.ndim
-    # Move channel axis to front, flatten rest
-    y = x.movedim(axis, 0).reshape(x.shape[axis], -1)  # [C, N]
+    y = x_fp.movedim(axis, 0).reshape(x.shape[axis], -1)  # [C, N] in fp32
 
     if symmetric:
-        a = torch.quantile(y.abs(), p, dim=1)  # [C]
+        a = torch.quantile(y.abs(), p, dim=1).to(x.dtype)  # [C]
         return -a, a
 
-    lo = torch.quantile(y, 1.0 - p, dim=1)  # [C]
-    hi = torch.quantile(y, p, dim=1)  # [C]
+    lo = torch.quantile(y, 1.0 - p, dim=1).to(x.dtype)  # [C]
+    hi = torch.quantile(y, p, dim=1).to(x.dtype)        # [C]
     return lo, hi
 
 
@@ -246,6 +249,20 @@ def quantize_affine(
     q = torch.clamp(q, qmin, qmax)
     return q.to(dtype), clipped_frac
 
+def quantize_symmetric(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    qmax: int,
+    dtype: torch.dtype = torch.int8,
+) -> Tuple[torch.Tensor, float]:
+    qmin = -qmax
+    q = torch.round(x / scale)
+
+    clipped = (q < qmin) | (q > qmax)
+    clipped_frac = clipped.to(torch.float32).mean().item()
+
+    q = torch.clamp(q, qmin, qmax)
+    return q.to(dtype), clipped_frac
 
 def dequantize_affine(
     q: torch.Tensor, scale: torch.Tensor, zero_point: torch.Tensor

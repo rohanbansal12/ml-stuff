@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import argparse
@@ -94,7 +93,7 @@ def main():
     parser.add_argument("--weight-decay", type=float, default=0.1)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--log-dir", type=str, default="./runs/gpt")
-    parser.add_argument("--run-name", type=str, default=None,
+    parser.add_argument("--run_name", type=str, default=None,
                     help="Name to show in TensorBoard")
     parser.add_argument("--rope", action="store_true", dest="rope")
     parser.add_argument("--rmsnorm", action="store_true", dest='rms_norm')
@@ -149,6 +148,13 @@ def main():
             f"Train loss:{train_loss:.4f}/perp:{train_perp:.4f} |",
             f"Val loss:{val_loss:.4f}/perp:{val_perp:.4f}"
         )
+
+        if (epoch+1) % 10 == 0:
+            ckpt = {
+                        "model_config": model.config,
+                        "model_state": model.state_dict(),
+                    }
+            torch.save(ckpt, f"/workspace/ml-stuff/ckpts/gpt/{run_name}_epoch={epoch}.pt")
 
     writer.close()
 

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 
 class RMSNorm(nn.Module):
     def __init__(self, norm_shape, eps=1e-8):
@@ -112,8 +111,8 @@ class MultiHeadAttention(nn.Module):
             # scores = F.softmax(scores, dim=-1)
             # scores = self.drop(scores)
             # att = scores @ V
-
-        att = F.scaled_dot_product_attention(Q, K, V, attn_mask=None, dropout_p = self.drop.p, is_causal=self.causal)
+        drop_p = self.drop.p if self.training else 0.0
+        att = F.scaled_dot_product_attention(Q, K, V, attn_mask=None, dropout_p = drop_p, is_causal=self.causal)
 
         # b, h, s, d_k -> b, s, d_model
         out = self.W_0(att.transpose(1, 2).reshape(b, s, d_mod))
@@ -178,6 +177,17 @@ class GPT(nn.Module):
         
         self.apply(self._init_weights)
         self.lm_head.weight = self.token_emb.weight
+
+        self.config = dict(
+            d_model=d_model,
+            num_heads=num_heads,
+            max_seq_len=max_seq_len,
+            num_layers=num_layers,
+            vocab_size=vocab_size,
+            dropout=dropout,
+            rope=rope,
+            rmsnorm=rmsnorm
+        )
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
