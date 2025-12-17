@@ -32,7 +32,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 8
 MAX_SEQ_LEN = 128
 CALIBRATION_BATCHES = 4
-EVALUATION_BATCHES = 20
+EVALUATION_BATCHES = 50
 SEED = 25
 
 TEXT_PATH = "/workspace/ml-stuff/data/shakespeare.txt"
@@ -317,21 +317,29 @@ def gptq_quantize_linear_one_layer(
     new_layer = GPTQLinear.from_float(fp_linear, W_q, S_w, group_size, perm)
     return new_layer
     
-# -----------------------------
-# Streaming driver: one layer at a time
-# -----------------------------
+
+def get_target_linear_names_in_order(model, include, exclude):
+    names = []
+    for name, mod in model.named_modules():
+        if not isinstance(mod, torch.nn.Linear):
+            continue
+        if include is not None and not include(name):
+            continue
+        if exclude is not None and exclude(name):
+            continue
+        names.append(name)
+    return names
+
 @torch.no_grad()
-def run_gptq_streaming_fc1_sequential(fp_model, tokens_1d, device):
-    q_model = copy.deepcopy(fp_model).to(device)
+def run_gptq_streaming_sequential(q_model, tokens_1d, device, include, exclude, s=''):
     q_model.eval()
 
     # decide layer order once (stable, forward-ish)
-    fc1_names = sorted([n for n, m in q_model.named_modules()
-                        if isinstance(m, torch.nn.Linear) and n.endswith("fc1")])
+    layer_names = get_target_linear_names_in_order(q_model, include, exclude)
 
-    print(f"Found {len(fc1_names)} fc1 layers")
+    print(f"Found {len(layer_names)} {s} layers")
 
-    for li, name in enumerate(fc1_names, 1):
+    for li, name in enumerate(layer_names, 1):
         # 1) collect Hessian for THIS layer on the CURRENT q_model
         agg = HessianAgg(store_on_cpu=True, max_rows=MAX_X_ROWS, dtype=torch.float64)
         h = attach_one_linear_input_hook(q_model, name, agg)
@@ -358,8 +366,8 @@ def run_gptq_streaming_fc1_sequential(fp_model, tokens_1d, device):
         # 3) cleanup
         del agg
         del H
-        if li % 4 == 0 or li == len(fc1_names):
-            print(f"Processed {li}/{len(fc1_names)} layers")
+        # if li % 4 == 0 or li == len(layer_names):
+        #     print(f"Processed {li}/{len(layer_names)} layers")
 
     return q_model
 
@@ -410,9 +418,24 @@ def main():
     loss, perp = evaluate_simple(fp32g_model, full_eval_data)
     print(f"FP32:  Loss:{loss:.6f} | Perp:{perp:.6f}")
 
-    q_model = run_gptq_streaming_fc1_sequential(fp_model, val_tokens, device)
+
+    fp_model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        dtype=torch.float16 if device.type == "cuda" else torch.float32,
+    ).to(device)
+    include_linear = lambda x: x.endswith("fc1")
+    q_model = run_gptq_streaming_sequential(fp_model, val_tokens, device, include_linear, exclude, s="fc1")
     loss, perp = evaluate_simple(q_model, full_eval_data)
     print(f"GPTQ fc1:  Loss:{loss:.6f} | Perp:{perp:.6f}")
+
+    fp_model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        dtype=torch.float16 if device.type == "cuda" else torch.float32,
+    ).to(device)
+    include_linear = lambda x: x.endswith("fc2")
+    q_model = run_gptq_streaming_sequential(fp_model, val_tokens, device, include_linear, exclude, s='fc2')
+    loss, perp = evaluate_simple(q_model, full_eval_data)
+    print(f"GPTQ fc2:  Loss:{loss:.6f} | Perp:{perp:.6f}")
 
     # # testing the GPTQ logic on a single row
     # act_map = collect_fc1_activations(fp_model, val_tokens, device)

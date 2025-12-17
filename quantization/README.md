@@ -297,3 +297,13 @@ The next stage builds on these findings.
 - **Symmetric percentile activation clipping (ap999)** caused major degradation and was harmful here.
 
 **Conclusion:** SmoothQuant improves W8A8 over naive approaches but is fragile and insufficient alone; weight-only methods (AWQ/GPTQ) are the natural next step.
+
+## Stage 4 — GPTQ (Weight-only, W4 grouped)
+
+We implemented a from-scratch GPTQ pipeline with Hessian-based error compensation and lazy block updates.
+
+**Results (OPT-1.3B, group size = 32):**
+- **GPTQ fc1 only (24 layers):** Loss **3.3377** | Perplexity **28.15**
+- **GPTQ fc2 only (24 layers):** Loss **3.3265** | Perplexity **27.84**
+
+GPTQ consistently improves over naive W4 grouped quantization and recovers most of the fp16 performance when applied to MLP layers.
