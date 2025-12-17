@@ -493,3 +493,158 @@ def quantize_model_w4(model, group_size, include, exclude):
         set_module_by_name(model, name, new_mod)
 
     return model
+
+class HessianAgg:
+    def __init__(self, store_on_cpu=True, max_rows=8000, dtype=torch.float64):
+        self.store_on_cpu = store_on_cpu
+        self.max_rows = max_rows
+        self.dtype = dtype
+        self.n = 0
+        self.H = None  # [d, d] on cpu (float64 by default)
+
+    @torch.no_grad()
+    def observe(self, x: torch.Tensor):
+        # x: [..., d]
+        X = x.detach().reshape(-1, x.shape[-1]).float()  # [N, d]
+        if self.max_rows is not None and X.size(0) > self.max_rows:
+            idx = torch.randint(0, X.size(0), (self.max_rows,), device=X.device)
+            X = X[idx]
+
+        X = X.to(dtype=self.dtype)
+        if self.store_on_cpu:
+            X = X.cpu()
+
+        if self.H is None:
+            d = X.size(1)
+            self.H = torch.zeros((d, d), dtype=self.dtype, device=X.device)
+
+        self.H += X.T @ X
+        self.n += X.size(0)
+
+    def finalize(self, damp_ratio=1e-4):
+        H = self.H / max(self.n, 1)
+        # damping (you said you're already doing this in build_hessian_from_X;
+        # you can keep it here instead and remove elsewhere)
+        diag_mean = torch.diagonal(H).mean()
+        if diag_mean > 0:
+            H = H + damp_ratio * diag_mean * torch.eye(H.size(0), dtype=H.dtype, device=H.device)
+        return H.float()
+    
+def attach_one_linear_input_hook(model, layer_name: str, agg: HessianAgg):
+    target = dict(model.named_modules())[layer_name]
+    assert isinstance(target, torch.nn.Linear)
+
+    def hook(mod, inp, out):
+        x = inp[0]
+        agg.observe(x)
+
+    h = target.register_forward_hook(hook)
+    return h
+
+class GPTQLinear(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        has_bias: bool,
+        has_perm: bool,
+        group_size: int,
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+
+        assert in_features % group_size == 0
+        n_groups = in_features // group_size
+        self.group_size = group_size
+        self.n_groups = n_groups
+
+        self.has_perm = bool(has_perm)
+        self.has_bias = bool(has_bias)
+
+        self.register_buffer(
+            "w_q",
+            torch.empty((out_features, n_groups, group_size), dtype=torch.int8),
+            persistent=True,
+        )
+        # store as [g, o] so it broadcasts nicely with y_g: [n, g, o]
+        self.register_buffer(
+            "s_w",
+            torch.empty((n_groups, out_features), dtype=torch.float32),
+            persistent=True,
+        )
+
+        # always present for state_dict compatibility
+        self.register_buffer(
+            "perm",
+            torch.empty((in_features,), dtype=torch.long),
+            persistent=True,
+        )
+
+        # always register bias param; zero it if unused
+        self.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.float32))
+
+    @classmethod
+    def from_float(
+        cls,
+        layer: nn.Linear,
+        w_q: torch.Tensor,  # [out, g, k] int8
+        s_w: torch.Tensor,  # [out, g, 1] float
+        group_size: int,
+        perm: torch.Tensor | None,
+    ):
+        out_f, in_f = layer.out_features, layer.in_features
+        has_bias = layer.bias is not None
+        has_perm = perm is not None
+
+        q = cls(
+            in_features=in_f,
+            out_features=out_f,
+            has_bias=has_bias,
+            has_perm=has_perm,
+            group_size=group_size,
+        ).to(layer.weight.device)
+
+        q.w_q.copy_(w_q.contiguous())
+
+        # s_w input is [out, g, 1] -> want [g, out]
+        s_go = s_w.to(torch.float32).squeeze(-1).transpose(0, 1).contiguous()
+        q.s_w.copy_(s_go)
+
+        if has_bias:
+            q.bias.data.copy_(layer.bias.detach().to(torch.float32))
+        else:
+            q.bias.data.zero_()
+
+        if has_perm:
+            q.perm.copy_(perm.to(dtype=torch.long, device=q.perm.device).contiguous())
+        else:
+            # identity perm for consistency
+            q.perm.copy_(torch.arange(in_f, device=q.perm.device, dtype=torch.long))
+
+        return q
+
+    def forward(self, x: torch.Tensor):
+        prefix = x.shape[:-1]
+        orig_dtype = x.dtype
+
+        x = x.flatten(start_dim=0, end_dim=-2)  # [N, in]
+        if self.has_perm:
+            x = x[..., self.perm]
+
+        x = x.view((x.size(0), self.n_groups, self.group_size))  # [N, g, k]
+
+        # int8 dot-product in fp32
+        x_f = x.float()
+        w_f = self.w_q.float()
+        y_g = torch.einsum("n g k, o g k -> n g o", x_f, w_f)  # [N, g, o]
+
+        # apply per-(g,o) scale: s_w is [g,o] -> [1,g,o]
+        y_g = y_g * self.s_w.unsqueeze(0)
+
+        y = y_g.sum(dim=1)  # [N, o]
+
+        if self.has_bias:
+            y = y + self.bias.to(y.dtype)
+
+        return y.view((*prefix, self.out_features)).to(orig_dtype)
