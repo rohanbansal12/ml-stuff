@@ -307,3 +307,26 @@ We implemented a from-scratch GPTQ pipeline with Hessian-based error compensatio
 - **GPTQ fc2 only (24 layers):** Loss **3.3265** | Perplexity **27.84**
 
 GPTQ consistently improves over naive W4 grouped quantization and recovers most of the fp16 performance when applied to MLP layers.
+
+## Stage 5 - AWQ (Activation-Aware Weight Quantization)
+
+We implemented AWQ using activation-based channel saliency and per-channel rescaling, followed by W4 grouped weight quantization (group size = 32).
+
+### Baselines (OPT-1.3B)
+
+- **FP:** Loss 3.3237 | Perp 27.76  
+- **FP32 GEMM:** Loss 3.3237 | Perp 27.76  
+
+### fc1 only
+
+- **Naive W4:** Loss 3.3662 | Perp 28.97  
+- **AWQ4:** Loss 3.3365 | Perp 28.12  
+
+### MLP (fc1 + fc2)
+
+- **Naive W4:** Loss 3.3669 | Perp 28.99  
+- **AWQ4:** Loss 3.3383 | Perp 28.17  
+
+### Summary
+
+AWQ consistently outperforms naive W4 weight-only quantization, recovering ~0.03 loss for both fc1-only and full MLP quantization, and bringing W4 performance much closer to FP.

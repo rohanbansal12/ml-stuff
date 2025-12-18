@@ -1,13 +1,9 @@
 import torch
-import torch.nn.functional as F
 import copy
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from ptq_utils import (
-    QuantLinearW4Grouped,
     evaluate_simple,
-    get_module_by_name,
-    capture_single_activation,
     get_batch_1d,
     force_fp32_gemm_all_linears,
     calibrate,
@@ -90,6 +86,7 @@ def main():
     loss, perp = evaluate_simple(fp32g_model, full_eval_data)
     print(f"FP32:    Loss:{loss:.6f} | Perp:{perp:.6f}")
 
+
     # -----------------------------
     # QuantLinearW8A8 Experiments
     # -----------------------------
@@ -123,90 +120,33 @@ def main():
             f"{mode}:     Loss:{q_loss:.6f} | Perp:{q_ppl:.6f} | Delta: (Quant-FP) loss: {q_loss - fp_loss:+.6e}"
         )
 
-    # # run one forward to populate last_x_clip
-    # clip_stats = {}
-    # for i in range(10):
-    #     x, y = full_eval_data[i]
-    #     with torch.no_grad():
-    #         _ = q_model(input_ids=x).logits
-
-    #     for name, mod in q_model.named_modules():
-    #         if hasattr(mod, "last_x_clip"):
-    #             v = mod.last_x_clip
-    #             # only keep real scalars
-    #             if torch.is_tensor(v) and v.numel() == 1:
-    #                 clip_stats[name] = clip_stats.get('name', 0.0) + float(v.detach().cpu().item())
-
-    # for name, value in clip_stats.items():
-    #     clip_stats[name] = value / 10
-    # top = sorted(clip_stats.items(), key=lambda kv: kv[1], reverse=True)[:10]
-    # for name, v in top:
-    #     print(f"{name:60s} clip_frac={v:.6f}")
-
-    # # compare single layer outputs
-    # layer_name = "model.decoder.layers.1.self_attn.out_proj"
-    # layer_fp = get_module_by_name(fp_model, layer_name)
-    # layer_q = get_module_by_name(q_model, layer_name)
-
-    # layer_fp.eval()
-    # layer_q.eval()
-
-    # saved_x = {}
-
-    # def hook_fn(mod, inp, out):
-    #     saved_x["x"] = inp[0].detach()
-
-    # h = layer_fp.register_forward_hook(hook_fn)
-
-    # # run one real batch through the FP model to populate saved_x
-    # x_tokens, _ = full_eval_data[0]
-    # with torch.no_grad():
-    #     _ = fp_model(input_ids=x_tokens).logits
-
-    # h.remove()
-
-    # x_real = saved_x["x"]
-    # print("captured shape:", x_real.shape, "dtype:", x_real.dtype)
-
-    # with torch.no_grad():
-    #     y_fp = layer_fp(x_real)
-    #     y_q  = layer_q(x_real)
-
-    # diff = (y_fp - y_q).abs()
-    # cos  = F.cosine_similarity(y_fp.float(), y_q.float(), dim=-1).mean().item()
-    # rel  = diff.float().mean() / (y_fp.float().abs().mean() + 1e-8)
-
-    # print(layer_name)
-    # print(f"max_abs={diff.max().item():.6e}  mean_abs={diff.mean().item():.6e}  rel_mean={rel.item():.6e}  cos={cos:.6f}")
-    # print("clip_frac on real x:", layer_q.last_x_clip.item())
-
 
     # -----------------------------
     # QuantLinearW4 Experiments
     # -----------------------------
 
-    # try W4 layer with various group_sizes on rand data (ensure layer math works)
-    layer_name = "model.decoder.layers.1.fc1"
-    layer_fp = get_module_by_name(fp_model, layer_name)
+    # # try W4 layer with various group_sizes on rand data (ensure layer math works)
+    # layer_name = "model.decoder.layers.1.fc1"
+    # layer_fp = get_module_by_name(fp_model, layer_name)
 
-    x_real = capture_single_activation(fp_model, layer_name, full_eval_data[0][0])
-    x = x_real.reshape(-1, x_real.size(-1))
+    # x_real = capture_single_activation(fp_model, layer_name, full_eval_data[0][0])
+    # x = x_real.reshape(-1, x_real.size(-1))
 
-    for group_size in [32, 64, 128, 256]:
-        layer_q = QuantLinearW4Grouped.from_float(layer_fp, group_size)
-        W = layer_fp.weight
-        W_hat = layer_q.w_q.to(layer_q.s_w.dtype) * layer_q.s_w.T.unsqueeze(-1)
-        W_hat = W_hat.reshape(W.shape)
-        diff = (W_hat - W).abs()
-        cos  = F.cosine_similarity(W_hat.float(), W.float(), dim=-1).mean().item()
-        print(f"{layer_name} W4, size={group_size} W: max_abs={diff.max().item():.6e} | mean_abs={diff.mean().item():.6e} | cos={cos:.6f}")
+    # for group_size in [32, 64, 128, 256]:
+    #     layer_q = QuantLinearW4Grouped.from_float(layer_fp, group_size)
+    #     W = layer_fp.weight
+    #     W_hat = layer_q.w_q.to(layer_q.s_w.dtype) * layer_q.s_w.T.unsqueeze(-1)
+    #     W_hat = W_hat.reshape(W.shape)
+    #     diff = (W_hat - W).abs()
+    #     cos  = F.cosine_similarity(W_hat.float(), W.float(), dim=-1).mean().item()
+    #     print(f"{layer_name} W4, size={group_size} W: max_abs={diff.max().item():.6e} | mean_abs={diff.mean().item():.6e} | cos={cos:.6f}")
 
-        y_fp = layer_fp(x)
-        y_q = layer_q(x)
-        diff = (y_fp - y_q).abs()
-        cos  = F.cosine_similarity(y_fp.float(), y_q.float(), dim=-1).mean().item()
-        rel  = diff.float().mean() / (y_fp.float().abs().mean() + 1e-8)
-        print(f"{layer_name} W4, size={group_size} x: max_abs={diff.max().item():.6e} | mean_abs={diff.mean().item():.6e} | rel_mean={rel.item():.6e} | cos={cos:.6f}")
+    #     y_fp = layer_fp(x)
+    #     y_q = layer_q(x)
+    #     diff = (y_fp - y_q).abs()
+    #     cos  = F.cosine_similarity(y_fp.float(), y_q.float(), dim=-1).mean().item()
+    #     rel  = diff.float().mean() / (y_fp.float().abs().mean() + 1e-8)
+    #     print(f"{layer_name} W4, size={group_size} x: max_abs={diff.max().item():.6e} | mean_abs={diff.mean().item():.6e} | rel_mean={rel.item():.6e} | cos={cos:.6f}")
 
     # quantize all MLP layers and compare loss/perp
     include_linear = lambda x: x.endswith("fc1") or x.endswith("fc2")

@@ -163,47 +163,49 @@ class QuantLinearW4Grouped(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-
-        assert in_features % group_size == 0
-        n_groups = in_features // group_size
+        self.has_bias = has_bias
         self.group_size = group_size
-        self.n_groups = n_groups
+        n_groups = in_features // group_size
 
         self.register_buffer(
             "w_q",
             torch.empty((out_features, n_groups, group_size), dtype=torch.int8),
             persistent=True,
         )
-        self.register_buffer(
-            "s_w",
-            torch.empty((n_groups, out_features), dtype=torch.float32),
-            persistent=True,
-        )
 
         self.register_buffer(
-            "has_bias", torch.tensor(int(has_bias), dtype=torch.uint8), persistent=True
+            "scales",
+            torch.empty((out_features, n_groups, 1), dtype=torch.float32),
+            persistent=True
         )
+
         self.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.float32))
 
     @classmethod
     def from_float(cls, layer: nn.Linear, group_size: int):
         out_f, in_f = layer.out_features, layer.in_features
+        n_groups = in_f // group_size
         has_bias = layer.bias is not None
+        device = layer.weight.device
 
         q = cls(
             in_features=in_f,
             out_features=out_f,
             has_bias=has_bias,
-            group_size=group_size,
-        ).to(layer.weight.device)
+            group_size=group_size
+        ).to(device)
 
-        # weights: symmetric per-output-channel
-        w_g = group_weights(layer.weight, group_size)
-        s_w = calc_group_scales(w_g, qmax=7)
-        w_q = quantize_grouped(w_g, s_w, qmin=-7, qmax=7)
+        W = layer.weight.data.clone().float()
+        W_g = W.view(out_f, n_groups, group_size)
 
-        q.w_q.copy_(w_q.contiguous())
-        q.s_w.copy_(s_w.to(torch.float32).contiguous().squeeze(-1).T)
+        scales = W_g.abs().amax(dim=-1, keepdim=True)
+        scales = scales / 7.0
+        scales = scales.clamp(min=1e-5)
+
+        w_int = (W_g / scales).round().clamp(-7, 7)
+
+        q.w_q.copy_(w_int.to(torch.int8))
+        q.scales.copy_(scales)
 
         if has_bias:
             q.bias.data.copy_(layer.bias.detach().to(torch.float32))
@@ -213,22 +215,17 @@ class QuantLinearW4Grouped(nn.Module):
         return q
 
     def forward(self, x: torch.Tensor):
-        prefix = x.shape[:-1]
         orig_dtype = x.dtype
 
-        x = x.flatten(start_dim=0, end_dim=-2)
-        x = x.view((x.size(0), self.n_groups, self.group_size))
+        w_recon = self.w_q.float() * self.scales
+        w_recon = w_recon.reshape(self.out_features, self.in_features)
 
-        x_f = x.float()
-        w_f = self.w_q.float()
-        y_g = torch.einsum("n g k, o g k -> n g o", x_f, w_f)
-        y_g = y_g * self.s_w.unsqueeze(0)
-        y = y_g.sum(dim=1)
+        y = x.float() @ w_recon.T
 
-        if bool(self.has_bias.item()):
+        if self.has_bias:
             y = y + self.bias.to(y.dtype)
 
-        return y.reshape((*prefix, self.out_features)).to(orig_dtype)
+        return y.to(orig_dtype)
     
 def get_module_by_name(root, dotted_name):
     parts = dotted_name.split(".")
