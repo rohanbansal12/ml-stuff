@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from quantize import quantize_symmetric, calc_qparams_symmetric, quantize_affine
+import triton
+import triton.language as tl
 
 def include(name: str) -> bool:
     # Target the “meaty” projections:
@@ -645,3 +647,378 @@ class GPTQLinear(nn.Module):
             y = y + self.bias.to(y.dtype)
 
         return y.view((*prefix, self.out_features)).to(orig_dtype)
+
+
+def pack_int4(q: torch.Tensor) -> torch.Tensor:
+    assert q.dtype == torch.int8
+    q = q.view(*q.shape[:-1], q.shape[-1] // 2, 2)
+    q0 = q[..., 0] & 0x0F
+    q1 = q[..., 1] & 0x0F
+    packed = (q1 << 4) | q0
+    return packed.to(torch.uint8)
+
+def unpack_int4(packed: torch.Tensor) -> torch.Tensor:
+    assert packed.dtype == torch.uint8
+
+    low  = packed & 0x0F
+    high = (packed >> 4) & 0x0F
+
+    low  = low.to(torch.int8)
+    high = high.to(torch.int8)
+
+    low[low >= 8]   -= 16
+    high[high >= 8] -= 16
+
+    q = torch.stack([low, high], dim=-1)
+    return q.view(*packed.shape[:-1], packed.shape[-1] * 2)
+
+def test_int4_pack_roundtrip():
+    q = torch.randint(-8, 8, (1024,), dtype=torch.int8)
+    q = q[: q.numel() // 2 * 2]  # ensure even length
+
+    packed = pack_int4(q)
+    q2 = unpack_int4(packed)
+
+    assert torch.equal(q, q2)
+
+
+class AWQW4Packed(nn.Module):
+    def __init__(self, in_features: int, out_features: int, has_bias: bool, group_size: int):
+        super().__init__()
+        assert in_features % group_size == 0
+        assert group_size % 2 == 0  # must be even to pack 2x int4 per byte
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.has_bias = has_bias
+        self.group_size = group_size
+        n_groups = in_features // group_size
+
+        # packed bytes: last dim is halved
+        self.register_buffer(
+            "w_q_packed",
+            torch.empty((out_features, n_groups, group_size // 2), dtype=torch.uint8),
+            persistent=True,
+        )
+
+        self.register_buffer(
+            "w_scales",
+            torch.empty((out_features, n_groups, 1), dtype=torch.float32),
+            persistent=True,
+        )
+
+        self.register_buffer(
+            "x_inv_s",
+            torch.empty((in_features, ), dtype=torch.float32),
+            persistent=True,
+        )
+
+        self.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.float32))
+
+    @classmethod
+    def from_float(cls, layer: nn.Linear, s: torch.Tensor, group_size: int):
+        out_f, in_f = layer.out_features, layer.in_features
+        n_groups = in_f // group_size
+        has_bias = layer.bias is not None
+        device = layer.weight.device
+
+        q = cls(in_features=in_f, out_features=out_f, has_bias=has_bias, group_size=group_size).to(device)
+
+        W = layer.weight.detach().float()  # [out, in]
+        W_g = W.view(out_f, n_groups, group_size)
+        
+        s = s.to(device).float().view(-1)
+        inv_s_vec = (1.0 / s).contiguous()
+        s_view = s.view(1, n_groups, group_size)
+
+        # AWQ: scale weights by s, and divide activations by s in forward
+        w_scaled = W_g * s_view
+
+        scales = w_scaled.abs().amax(dim=-1, keepdim=True) / 7.0
+        scales = scales.clamp(min=1e-5)
+
+        # quantize to int4-ish values (stored in int8 container)
+        w_int = torch.round(w_scaled / scales).clamp(-7, 7).to(torch.int8)   # [out, g, k]
+
+        # pack last dim (k) -> k/2 bytes
+        w_packed = pack_int4(w_int)  # expect uint8 [out, g, k/2]
+
+        q.w_q_packed.copy_(w_packed.contiguous())
+        q.w_scales.copy_(scales.contiguous())
+        q.x_inv_s.copy_(inv_s_vec)
+
+        if has_bias:
+            q.bias.data.copy_(layer.bias.detach().to(torch.float32))
+        else:
+            q.bias.data.zero_()
+
+        return q
+
+    def forward(self, x: torch.Tensor):
+        orig_dtype = x.dtype
+
+        w_int = unpack_int4(self.w_q_packed).to(torch.float32)  # [out, g, k]
+        w_recon = (w_int * self.w_scales).reshape(self.out_features, self.in_features)  # [out, in]
+
+        x_f = x.to(torch.float32) * self.x_inv_s
+        y = x_f @ w_recon.T
+
+        if self.has_bias:
+            y = y + self.bias.to(y.dtype)
+
+        return y.to(orig_dtype)
+
+    # @torch.no_grad()
+    # def forward_kernel(
+    #     self,
+    #     x: torch.Tensor,                     # [N, K]
+    #     *,
+    #     BLOCK_M=64,
+    #     BLOCK_N=64,
+    #     BLOCK_K=32,
+    #     num_warps=4,
+    #     num_stages=2,
+    # ):
+    #     # ---- shapes ----
+    #     assert x.ndim == 2
+    #     N, K = x.shape
+    #     O = self.out_features
+    #     assert K == self.in_features
+    #     assert K % self.group_size == 0
+    #     assert (K % BLOCK_K) == 0, "kernel uses tl.static_range(0, K, BLOCK_K)"
+
+    #     # ---- allocate output ----
+    #     y = torch.empty((N, O), device=x.device, dtype=x.dtype)
+
+    #     # ---- pointers / tensors expected by kernel ----
+    #     # W_ptr: [O, G, K/2] uint8   (packed int4)
+    #     # SCALES_ptr: [O, G] fp16/fp32
+    #     # INV_S_ptr: [K] fp16/fp32
+    #     # BIAS_ptr: [O] fp16/fp32 or None
+
+    #     W_packed = self.w_q_packed                            # uint8 [O, G, K/2] (your storage)
+    #     scales = self.w_scales.squeeze(-1)                  # [O, G]
+    #     inv_s = self.x_inv_s.to(scales.dtype)           # [K]
+    #     bias = self.bias.to(scales.dtype) if self.has_bias else None
+
+    #     # ---- compute strides (in elements, not bytes) ----
+    #     # X is [N, K]
+    #     stride_xn = x.stride(0)
+    #     stride_xk = x.stride(1)
+
+    #     # W is [O, G, K/2]
+    #     stride_wo  = W_packed.stride(0)
+    #     stride_wg  = W_packed.stride(1)
+    #     stride_wk2 = W_packed.stride(2)
+
+    #     # scales is [O, G]
+    #     stride_so = scales.stride(0)
+    #     stride_sg = scales.stride(1)
+
+    #     # inv_s is [K]
+    #     stride_inv = inv_s.stride(0)
+
+    #     # Y is [N, O]
+    #     stride_yn = y.stride(0)
+    #     stride_yo = y.stride(1)
+
+    #     # ---- grid ----
+    #     grid = (triton.cdiv(N, BLOCK_M), triton.cdiv(O, BLOCK_N))
+
+    #     # ---- launch ----
+    #     awq_w4_gemm_kernel[grid](
+    #         x, W_packed, scales, inv_s,
+    #         bias if bias is not None else x,   # dummy ptr if HAS_BIAS=0 (won't be read)
+    #         y,
+    #         N=N, O=O, K=K, GROUP_SIZE=self.group_size,
+    #         stride_xn=stride_xn, stride_xk=stride_xk,
+    #         stride_wo=stride_wo, stride_wg=stride_wg, stride_wk2=stride_wk2,
+    #         stride_so=stride_so, stride_sg=stride_sg,
+    #         stride_inv=stride_inv,
+    #         stride_yn=stride_yn, stride_yo=stride_yo,
+    #         HAS_BIAS=1 if bias is not None else 0,
+    #         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+    #         num_warps=num_warps,
+    #         num_stages=num_stages,
+    #     )
+    #     return y
+
+@triton.jit
+def awq_w4_gemm_kernel(
+    X_ptr, W_ptr, SCALES_ptr, INV_S_ptr, BIAS_ptr, Y_ptr,
+    N: tl.constexpr, O: tl.constexpr, K: tl.constexpr, GROUP_SIZE: tl.constexpr,
+    stride_xn: tl.constexpr, stride_xk: tl.constexpr,
+    stride_wo: tl.constexpr, stride_wg: tl.constexpr, stride_wk2: tl.constexpr,
+    stride_so: tl.constexpr, stride_sg: tl.constexpr,
+    stride_inv: tl.constexpr,
+    stride_yn: tl.constexpr, stride_yo: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+):
+
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    n0 = pid_m * BLOCK_M
+    o0 = pid_n * BLOCK_N
+    offs_m = n0 + tl.arange(0, BLOCK_M)
+    offs_o = o0 + tl.arange(0, BLOCK_N)
+    mask_o = offs_o < O
+    mask_m = offs_m < N
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+
+    # ----------------------------
+    # 3) Loop over K in BLOCK_K steps
+    # ----------------------------
+    for k0 in tl.static_range(0, K, BLOCK_K):
+    # For each k-tile:
+    #   3.1) Load X tile
+    #       - shape: [BLOCK_M, BLOCK_K]
+    #       - mask invalid rows/cols
+    #       - cast to fp32 for math
+        offs_k = k0 + tl.arange(0, BLOCK_K)  # [BK]
+        mask_k = offs_k < K
+
+        x_ptrs = X_ptr + offs_m[:, None] * stride_xn + offs_k[None, :] * stride_xk
+        x = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float16)
+    #
+    #   3.2) Apply AWQ input rescale
+    #       - load INV_S for this k-range (shape [BLOCK_K])
+    #       - multiply X tile by INV_S (broadcast along M)
+        inv_ptrs = INV_S_ptr + offs_k * stride_inv
+        inv = tl.load(inv_ptrs, mask=mask_k, other=0.0).to(tl.float16)
+        x = x * inv[None, :]
+    #
+    #   3.3) Compute group/nibble addressing for weights
+    #       - For each k in this tile:
+    #           g  = k // GROUP_SIZE
+    #           kk = k %  GROUP_SIZE
+    #           byte_index = kk // 2     (since 2 int4 per byte)
+    #           nibble_sel = kk & 1      (0 = low nibble, 1 = high nibble)
+        offs_g = offs_k // GROUP_SIZE
+        offs_kk = offs_k - offs_g * GROUP_SIZE
+        offs_byte = offs_kk >> 1
+        nibble_sel = offs_kk & 1
+    #
+    #   3.4) Load packed weight bytes for this tile
+    #       - You want bytes corresponding to:
+    #           outputs: O tile (BLOCK_N)
+    #           k-range: this BLOCK_K
+    #       - Use strides (stride_wo, stride_wg, stride_wk2)
+    #       - Result is uint8 “packed” values
+        w_ptrs = (
+            W_ptr
+            + offs_o[:, None] * stride_wo
+            + offs_g[None, :] * stride_wg
+            + offs_byte[None, :] * stride_wk2
+        )
+        w_mask = mask_o[:, None] & mask_k[None, :]
+        w_packed = tl.load(w_ptrs, mask=w_mask, other=0).to(tl.uint8)
+    #
+    #   3.5) Unpack int4 -> signed int8
+    #       - Extract low/high nibble from each byte using nibble_sel
+    #       - Convert 0..15 to signed range consistent with your packing:
+    #           * if you used two’s complement int4: map to [-8,7]
+    #           * if you used offset packing: undo the offset to [-7,7]
+        low = w_packed & 0x0F
+        high = (w_packed >> 4) & 0x0F
+        w_u4 = tl.where(nibble_sel[None, :] == 0, low, high)
+        w_s4 = tl.where(w_u4 < 8, w_u4, w_u4 - 16)
+        w_i8 = w_s4.to(tl.int8)
+    #
+    #   3.6) Load dequant scales for this tile
+    #       - scales are per-(output, group):
+    #           scale[o, g]
+    #       - For each k, pick its group g and broadcast across M
+        scales_ptrs = SCALES_ptr + (offs_o[:, None] * stride_so) + (offs_g[None, :] * stride_sg)
+        scale_ok = tl.load(
+            scales_ptrs,
+            mask=(mask_o[:, None] & mask_k[None, :]),
+            other=0.0,
+        ).to(tl.float32)
+    #
+    #   3.7) Dequantize weights
+    #       - w_fp32 = q_int8 * scale_fp32
+    #       - w_fp32 should correspond to weight values for these O and K indices
+    #
+        w_fp32 = (w_i8 * scale_ok).to(tl.float16)
+
+    #   3.8) Accumulate GEMM
+    #       - acc += X_tile_fp32 @ (W_tile_fp32)^T
+    #       - Make sure shapes align:
+    #           X: [BM, BK]
+    #           W: [BN, BK]  (transpose inside dot)
+    #
+        acc += tl.dot(x, tl.trans(w_fp32))
+    # Notes:
+    #   - Keep everything fp32 inside the loop for stability
+    #   - Use masks consistently to avoid OOB loads
+    #   - Prefer reuse: compute g/byte/nibble once per k-tile
+
+    # ----------------------------
+    # 4) Optional bias
+    # ----------------------------
+    # - If HAS_BIAS:
+    #     load bias for O tile [BLOCK_N]
+    #     acc += bias (broadcast across M)
+    if HAS_BIAS:
+        bias = tl.load(BIAS_ptr + offs_o, mask=mask_o, other=0.0).to(tl.float32)
+        acc += bias[None, :]
+
+    # ----------------------------
+    # 5) Store output
+    # ----------------------------
+    # - Cast acc back to output dtype (fp16/bf16)
+    # - Store to Y with proper strides
+    # - Apply mask for tail tiles
+
+    acc = acc.to(tl.float32)
+    y_ptrs = Y_ptr + offs_m[:, None] * stride_yn + offs_o[None, :] * stride_yo
+    tl.store(y_ptrs, acc, mask=mask_m[:, None] & mask_o[None, :])
+
+def compare_outputs(
+    y_ref: torch.Tensor,
+    y_test: torch.Tensor,
+    name_ref="slow",
+    name_test="triton",
+):
+    """
+    Compare two tensors numerically.
+    Intended for y_slow vs y_triton checks.
+    """
+    assert y_ref.shape == y_test.shape, "Shape mismatch"
+
+    y_ref_f = y_ref.float().flatten()
+    y_test_f = y_test.float().flatten()
+
+    diff = y_test_f - y_ref_f
+    abs_diff = diff.abs()
+
+    max_abs = abs_diff.max().item()
+    mean_abs = abs_diff.mean().item()
+
+    # relative error (avoid div-by-zero)
+    denom = y_ref_f.abs().clamp(min=1e-6)
+    rel_err = (abs_diff / denom).mean().item()
+
+    # cosine similarity
+    cos = F.cosine_similarity(y_ref_f, y_test_f, dim=0).item()
+
+    print(f"\n=== Output comparison ({name_test} vs {name_ref}) ===")
+    print(f"Max |Δ|        : {max_abs:.6e}")
+    print(f"Mean |Δ|       : {mean_abs:.6e}")
+    print(f"Mean rel error : {rel_err:.6e}")
+    print(f"Cosine sim     : {cos:.6f}")
+
+    # sanity stats
+    print("\nStats:")
+    print(f"{name_ref}: min={y_ref_f.min():.4e}, max={y_ref_f.max():.4e}, mean={y_ref_f.mean():.4e}")
+    print(f"{name_test}: min={y_test_f.min():.4e}, max={y_test_f.max():.4e}, mean={y_test_f.mean():.4e}")
+
+    # NaN / inf check
+    for name, y in [(name_ref, y_ref_f), (name_test, y_test_f)]:
+        if torch.isnan(y).any():
+            print(f"WARNING: {name} contains NaNs")
+        if torch.isinf(y).any():
+            print(f"WARNING: {name} contains Infs")

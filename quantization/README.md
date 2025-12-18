@@ -310,7 +310,7 @@ GPTQ consistently improves over naive W4 grouped quantization and recovers most 
 
 ## Stage 5 - AWQ (Activation-Aware Weight Quantization)
 
-We implemented AWQ using activation-based channel saliency and per-channel rescaling, followed by W4 grouped weight quantization (group size = 32).
+We implemented AWQ using activation-based channel saliency and per-channel rescaling, followed by W4 grouped weight quantization (group size = 32). We also further optimize the storage by packing 2 4-bit weights into torch.uint8 tensors (as torch does not have native 4-bit support). This confirms that our quantization is working properly and we can achieve the expected memory savings without any real performance loss.
 
 ### Baselines (OPT-1.3B)
 

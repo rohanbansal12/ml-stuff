@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import copy
+import time
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from ptq_utils import (
     evaluate_simple,
@@ -12,6 +14,7 @@ from ptq_utils import (
     get_module_by_name,
     set_module_by_name,
     quantize_model_w4,
+    AWQW4Packed,
 )
 
 import sys
@@ -29,13 +32,56 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 8
 MAX_SEQ_LEN = 128
 CALIBRATION_BATCHES = 2
-EVALUATION_BATCHES = 20
+EVALUATION_BATCHES = 50
 SEED = 25
 
 TEXT_PATH = "/workspace/ml-stuff/data/shakespeare.txt"
 
 MAX_X_ROWS = 1024
 GROUP_SIZE = 32
+
+
+@torch.no_grad()
+def time_evaluate_simple(model, eval_data, device, *, warmup_batches=2, label=""):
+    # Warmup (important for CUDA + Triton + caches)
+    model.eval()
+    for i in range(min(warmup_batches, len(eval_data))):
+        x, _ = eval_data[i]
+        _ = model(input_ids=x.to(device)).logits
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+
+    # Timed eval
+    t0 = time.perf_counter()
+    loss, perp = evaluate_simple(model, eval_data)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    t1 = time.perf_counter()
+
+    secs = t1 - t0
+    toks = sum(y.numel() for _, y in eval_data)
+    tok_s = toks / secs
+    print(f"{label} time: {secs:.3f}s | tok/s: {tok_s:,.0f}")
+
+    return loss, perp, secs, tok_s
+
+
+@torch.no_grad()
+def warmup_triton_for_eval(model, full_eval_data, device, iters=2, do_loss=False):
+    model.eval()
+    # Use the first eval batch to match exact shapes/dtypes
+    x, y = full_eval_data[0]
+    x = x.to(device)
+    y = y.to(device)
+
+    for _ in range(iters):
+        logits = model(input_ids=x).logits
+        if do_loss:
+            V = logits.size(-1)
+            _ = F.cross_entropy(logits.float().view(-1, V), y.view(-1), reduction="sum")
+
+    if device.type == "cuda":
+        torch.cuda.synchronize()
 
 
 @torch.no_grad()
@@ -61,86 +107,6 @@ def compute_saliency_stats(
         h.remove()
 
     return calib.finalize()
-
-
-class AWQW4Grouped(nn.Module):
-    def __init__(
-        self, in_features: int, out_features: int, has_bias: bool, group_size: int
-    ):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.has_bias = has_bias
-        self.group_size = group_size
-        n_groups = in_features // group_size
-
-        self.register_buffer(
-            "w_q",
-            torch.empty((out_features, n_groups, group_size), dtype=torch.int8),
-            persistent=True,
-        )
-
-        self.register_buffer(
-            "scales",
-            torch.empty((out_features, n_groups, 1), dtype=torch.float32),
-            persistent=True,
-        )
-
-        self.register_buffer(
-            "s", torch.empty((in_features,), dtype=torch.float32), persistent=True
-        )
-
-        self.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.float32))
-
-    @classmethod
-    def from_float(cls, layer: nn.Linear, s: torch.Tensor, group_size: int):
-        out_f, in_f = layer.out_features, layer.in_features
-        n_groups = in_f // group_size
-        has_bias = layer.bias is not None
-        device = layer.weight.device
-
-        q = cls(
-            in_features=in_f,
-            out_features=out_f,
-            has_bias=has_bias,
-            group_size=group_size,
-        ).to(device)
-
-        W = layer.weight.data.clone().float()
-        W_g = W.view(out_f, n_groups, group_size)
-        s_view = s.view(1, n_groups, group_size)
-
-        w_scaled = W_g * s_view
-        scales = w_scaled.abs().amax(dim=-1, keepdim=True)
-        scales = scales / 7.0
-        scales = scales.clamp(min=1e-5)
-
-        w_int = (w_scaled / scales).round().clamp(-7, 7)
-
-        q.w_q.copy_(w_int.to(torch.int8))
-        q.scales.copy_(scales)
-        q.s.copy_(s.float().contiguous())
-
-        if has_bias:
-            q.bias.data.copy_(layer.bias.detach().to(torch.float32))
-        else:
-            q.bias.data.zero_()
-
-        return q
-
-    def forward(self, x: torch.Tensor):
-        orig_dtype = x.dtype
-
-        w_recon = self.w_q.float() * self.scales
-        w_recon = w_recon.reshape(self.out_features, self.in_features)
-
-        x = x.float() / self.s
-        y = x @ w_recon.T
-
-        if self.has_bias:
-            y = y + self.bias.to(y.dtype)
-
-        return y.to(orig_dtype)
 
 
 @torch.no_grad()
@@ -237,7 +203,7 @@ class SaliencyAgg:
         return stats_dict
 
 
-def quantize_model_awq(model, scale_stats, include, exclude):
+def quantize_model_awq(model, scale_stats, include, exclude, packed=False):
     to_replace = []
     for name, mod in model.named_modules():
         if isinstance(mod, nn.Linear):
@@ -247,7 +213,7 @@ def quantize_model_awq(model, scale_stats, include, exclude):
 
     for name, mod in to_replace:
         s = scale_stats[name]
-        new_mod = AWQW4Grouped.from_float(mod, s, GROUP_SIZE)
+        new_mod = AWQW4Packed.from_float(mod, s, GROUP_SIZE)
         set_module_by_name(model, name, new_mod)
 
     return model
@@ -261,7 +227,9 @@ def eval_harness(tokens, full_eval_data, device, include, exclude, s=""):
     fp_model.eval()
 
     q_model = quantize_model_w4(fp_model, GROUP_SIZE, include, exclude)
-    loss, perp = evaluate_simple(q_model, full_eval_data)
+    loss, perp, t_w4, r_w4 = time_evaluate_simple(
+        q_model, full_eval_data, device, label=f"W4 {s}"
+    )
     print(f"W4 {s}:  Loss:{loss:.6f} | Perp:{perp:.6f}")
 
     fp_model = AutoModelForCausalLM.from_pretrained(
@@ -286,9 +254,16 @@ def eval_harness(tokens, full_eval_data, device, include, exclude, s=""):
         smin=0.1,
         smax=10.0,
     )
-    q_model = quantize_model_awq(fp_model, scale_dict, include, exclude)
-    loss, perp = evaluate_simple(q_model, full_eval_data)
-    print(f"AWQ4 {s}:  Loss:{loss:.6f} | Perp:{perp:.6f}")
+    q_model = quantize_model_awq(fp_model, scale_dict, include, exclude, packed=True)
+    warmup_triton_for_eval(q_model, full_eval_data, device, iters=2, do_loss=False)
+    loss, perp, t_awq, r_awq = time_evaluate_simple(
+        q_model, full_eval_data, device, label=f"AWQ4Packed {s}"
+    )
+    print(f"AWQ4Packed {s}:  Loss:{loss:.6f} | Perp:{perp:.6f}")
+
+    print(
+        f"Speedup (AWQ4Packed vs W4): {t_w4 / t_awq:.2f}x (time), {r_awq / r_w4:.2f}x (tok/s)"
+    )
 
 
 # -----------------------------
@@ -327,7 +302,10 @@ def main():
         x, y = get_batch_1d(val_tokens, BATCH_SIZE, MAX_SEQ_LEN, device=device)
         full_eval_data.append((x, y))
 
-    fp_loss, fp_ppl = evaluate_simple(fp_model, full_eval_data)
+    # fp_loss, fp_ppl = evaluate_simple(fp_model, full_eval_data)
+    fp_loss, fp_ppl, t_w4, r_w4 = time_evaluate_simple(
+        fp_model, full_eval_data, device, label="FP"
+    )
     print(f"FP:    Loss:{fp_loss:.6f} | Perp:{fp_ppl:.6f}")
 
     fp32g_model = force_fp32_gemm_all_linears(
@@ -343,6 +321,32 @@ def main():
     eval_harness(val_tokens, full_eval_data, device, include_linear, exclude, "MLP")
 
     eval_harness(val_tokens, full_eval_data, device, include, exclude, "full")
+
+    # include_linear = lambda x: x.endswith("fc1")
+    # fp_model = AutoModelForCausalLM.from_pretrained(
+    #     MODEL_NAME,
+    #     dtype=torch.float16 if device.type == "cuda" else torch.float32,
+    # ).to(device)
+    # fp_model.eval()
+    # saliency_stats = compute_saliency_stats(
+    #     fp_model,
+    #     tokens,
+    #     BATCH_SIZE,
+    #     MAX_SEQ_LEN,
+    #     device,
+    #     include=include_linear,
+    #     exclude=exclude,
+    # )
+    # layer_name = list(saliency_stats.keys())[0]
+    # layer = get_module_by_name(fp_model, layer_name)
+    # K = layer.in_features
+    # q = AWQW4Packed.from_float(layer, torch.ones((K, ), device=device), GROUP_SIZE)
+    # x = saliency_stats[layer_name]['act_batch'].to(device)
+    # y_slow = q.forward(x)
+    # print(x.shape, y_slow.shape)
+    # y_tri  = q.forward_triton_debug(x)
+    # print(y_tri.shape)
+    # compare_outputs(y_slow, y_tri)
 
 
 if __name__ == "__main__":
