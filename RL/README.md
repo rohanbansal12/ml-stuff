@@ -269,7 +269,7 @@ Using the minimum over critics reduces overestimation bias and improves stabilit
 
 The optimal maximum-entropy policy satisfies:
 
-$$\pi^*(\cdot|s) \propto \exp\left(\frac{1}{\alpha} Q^{\text{*}}(s,\cdot)\right)$$
+$$\pi^*(\cdot|s) \propto \exp\left(\frac{1}{\alpha} Q^{*}(s,\cdot)\right)$$
 
 Instead of solving this directly, SAC performs gradient descent on the policy parameters $\theta$ using the objective:
 
