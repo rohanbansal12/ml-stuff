@@ -215,15 +215,15 @@ Compared to PPO, SAC trades on-policy stability for **off-policy efficiency and 
 
 Instead of maximizing expected return alone, SAC maximizes a **soft** objective that includes an entropy bonus:
 
-$J(\pi) = \mathbb{E}\left[\sum_{t=0}^{\infty} \gamma^t \left(r(s_t,a_t) + \alpha \mathcal{H}(\pi(\cdot|s_t))\right)\right]$
+$$J(\pi) = \mathbb{E}\left[\sum_{t=0}^{\infty} \gamma^t \left(r(s_t,a_t) + \alpha \mathcal{H}(\pi(\cdot|s_t))\right)\right]$$
 
 where the policy entropy is defined as:
 
-$\mathcal{H}(\pi(\cdot|s)) = -\mathbb{E}_{a\sim\pi(\cdot|s)}[\log \pi(a|s)]$
+$$\mathcal{H}(\pi(\cdot|s)) = -\mathbb{E}_{a\sim\pi(\cdot|s)}[\log \pi(a|s)]$$
 
 Equivalently, when sampling $a_t \sim \pi(\cdot|s_t)$, the per-step objective becomes:
 
-$r(s_t,a_t) - \alpha \log \pi(a_t|s_t)$
+$$r(s_t,a_t) - \alpha \log \pi(a_t|s_t)$$
 
 The temperature parameter $\alpha > 0$ controls the tradeoff between exploration and exploitation.
 
@@ -233,19 +233,19 @@ The temperature parameter $\alpha > 0$ controls the tradeoff between exploration
 
 Define the **soft Q-function** as:
 
-$Q^\pi(s,a) = \mathbb{E}\left[\sum_{k=0}^{\infty} \gamma^k \left(r_{t+k} - \alpha \log \pi(a_{t+k}|s_{t+k})\right)\,\middle|\,s_t=s, a_t=a\right]$
+$$Q^\pi(s,a) = \mathbb{E}\left[\sum_{k=0}^{\infty} \gamma^k \left(r_{t+k} - \alpha \log \pi(a_{t+k}|s_{t+k})\right)\,\middle|\,s_t=s, a_t=a\right]$$
 
 Define the **soft value function** as:
 
-$V^\pi(s) = \mathbb{E}_{a\sim\pi}\left[Q^\pi(s,a) - \alpha \log \pi(a|s)\right]$
+$$V^\pi(s) = \mathbb{E}_{a\sim\pi}\left[Q^\pi(s,a) - \alpha \log \pi(a|s)\right]$$
 
 These satisfy the **soft Bellman equation**:
 
-$Q^\pi(s,a) = r(s,a) + \gamma \mathbb{E}_{s'}[V^\pi(s')]$
+$$Q^\pi(s,a) = r(s,a) + \gamma \mathbb{E}_{s'}[V^\pi(s')]$$
 
 Substituting $V^\pi$ gives:
 
-$Q^\pi(s,a) = r(s,a) + \gamma \mathbb{E}_{s',a'\sim\pi}\left[Q^\pi(s',a') - \alpha \log \pi(a'|s')\right]$
+$$Q^\pi(s,a) = r(s,a) + \gamma \mathbb{E}_{s',a'\sim\pi}\left[Q^\pi(s',a') - \alpha \log \pi(a'|s')\right]$$
 
 ---
 
