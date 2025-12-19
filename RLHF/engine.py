@@ -16,6 +16,15 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def env_info():
+    """Print environment information and determine optimal dtype.
+
+    Displays library versions, GPU information, and CUDA availability.
+    Determines whether bfloat16 is supported by the GPU and returns
+    the appropriate dtype for model inference.
+
+    Returns:
+        torch.dtype: torch.bfloat16 if GPU supports it, otherwise torch.float16.
+    """
     print("=" * 60)
     print("Library Versions")
     print("=" * 60)
@@ -60,6 +69,18 @@ def env_info():
 
 
 def load_tokenizer(model_name, verbose=False):
+    """Load and configure a tokenizer for RLHF training.
+
+    Loads a HuggingFace tokenizer and configures it for reinforcement learning
+    by setting left padding and truncation. Ensures padding token is set.
+
+    Args:
+        model_name: Model name or path for AutoTokenizer.from_pretrained.
+        verbose: Whether to print tokenizer special token information.
+
+    Returns:
+        transformers.PreTrainedTokenizer: Configured tokenizer instance.
+    """
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -89,6 +110,14 @@ def load_tokenizer(model_name, verbose=False):
 
 
 def tokenizer_test(tok):
+    """Test tokenizer chat template and display tokenization details.
+
+    Applies the chat template to sample messages and prints the raw template
+    string, tokenization info, and generation start position.
+
+    Args:
+        tok: Tokenizer instance to test.
+    """
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Say hello in one sentence."},
@@ -132,6 +161,16 @@ def tokenizer_test(tok):
 
 
 def load_model(model_name, dtype, device):
+    """Load a causal language model in evaluation mode.
+
+    Args:
+        model_name: Model name or path for AutoModelForCausalLM.from_pretrained.
+        dtype: Torch dtype for model parameters (e.g., torch.bfloat16).
+        device: Device to load the model on (e.g., 'cuda' or 'cpu').
+
+    Returns:
+        transformers.PreTrainedModel: Model in evaluation mode.
+    """
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_name, dtype=dtype
     ).to(device)
@@ -141,6 +180,15 @@ def load_model(model_name, dtype, device):
 
 
 def model_test(model, tokenizer):
+    """Run basic model sanity checks and display model info.
+
+    Tests model forward pass with a sample prompt and prints device,
+    dtype, training mode, and output shape information.
+
+    Args:
+        model: Model instance to test.
+        tokenizer: Tokenizer instance for encoding test input.
+    """
     print("param device:", next(model.parameters()).device)
     print("param dtype:  ", next(model.parameters()).dtype)
     print("model.training:", model.training)
@@ -187,6 +235,27 @@ def generate_one(
     seed=None,
     **gen_kwargs,
 ):
+    """Generate a completion from chat messages with detailed output.
+
+    Applies chat template, tokenizes, generates completion, and returns
+    both the full output and isolated completion with token IDs.
+
+    Args:
+        model: Causal language model for generation.
+        tokenizer: Tokenizer with chat template support.
+        messages: List of message dicts with 'role' and 'content' keys.
+        max_new_tokens: Maximum number of tokens to generate.
+        do_sample: Whether to use sampling (vs greedy decoding).
+        temperature: Sampling temperature (ignored if do_sample=False).
+        top_p: Nucleus sampling parameter (ignored if do_sample=False).
+        repetition_penalty: Optional penalty for token repetition.
+        seed: Optional random seed for reproducible sampling.
+        **gen_kwargs: Additional kwargs passed to model.generate().
+
+    Returns:
+        GenOutput: Dataclass containing prompt_text, prompt_len, output_ids,
+            completion_ids, output_text, and completion_text.
+    """
     # 0) (Optional) control randomness
     if seed is not None:
         torch.manual_seed(seed)
@@ -256,6 +325,18 @@ def generate_one(
 
 
 def generate_test(model, tokenizer):
+    """Test generate_one determinism and randomness control.
+
+    Verifies that greedy decoding is deterministic, seeded sampling is
+    reproducible, and different seeds produce different outputs.
+
+    Args:
+        model: Model instance to test.
+        tokenizer: Tokenizer instance for test messages.
+
+    Raises:
+        AssertionError: If determinism or seeding tests fail.
+    """
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Say hello in one sentence."},
@@ -275,10 +356,25 @@ def generate_test(model, tokenizer):
 
 
 def completion_logprobs(model, input_ids, attention_mask, prompt_lens, require_grad = False):
-    """
-    input_ids:      [B, T] prompt+completion (padded)
-    attention_mask: [B, T] 1 real, 0 pad
-    prompt_lens:    [B] number of prompt tokens per example (int)
+    """Compute log probabilities for completion tokens in batched sequences.
+
+    Runs a forward pass and computes per-token log probabilities for the
+    completion portion of each sequence (tokens after the prompt). Handles
+    padding and position IDs correctly for left-padded sequences.
+
+    Args:
+        model: Causal language model.
+        input_ids: Token IDs of shape [B, T] containing prompt + completion (left-padded).
+        attention_mask: Attention mask of shape [B, T] where 1 = real token, 0 = padding.
+        prompt_lens: Number of prompt tokens per example, shape [B].
+        require_grad: Whether to enable gradients for the forward pass.
+
+    Returns:
+        A tuple containing:
+            - sum_logp (torch.Tensor): Sum of log probs over completion tokens, shape [B].
+            - mean_logp (torch.Tensor): Mean log prob over completion tokens, shape [B].
+            - token_logp (torch.Tensor): Per-token log probs, shape [B, T-1].
+            - completion_mask (torch.Tensor): Boolean mask for completion tokens, shape [B, T-1].
     """
     position_ids = attention_mask.long().cumsum(dim=1) - 1
     position_ids = position_ids.clamp_min(0)
@@ -318,9 +414,22 @@ def completion_logprobs(model, input_ids, attention_mask, prompt_lens, require_g
 
 
 def _find_single_token_id(tokenizer, candidates=None):
-    """
-    Find a token that the tokenizer encodes as exactly 1 token.
-    Returns (token_id, token_str).
+    """Find a token that encodes to exactly one token ID.
+
+    Searches through candidate strings to find one that tokenizes to a
+    single token. Used for testing completion logprob calculations.
+
+    Args:
+        tokenizer: Tokenizer instance to test candidates with.
+        candidates: Optional list of candidate strings to try.
+
+    Returns:
+        A tuple containing:
+            - token_id (int): The single token ID.
+            - token_str (str): The string that produced it.
+
+    Raises:
+        RuntimeError: If no single-token candidate found.
     """
     if candidates is None:
         candidates = [
@@ -352,6 +461,20 @@ def _find_single_token_id(tokenizer, candidates=None):
 
 
 def _build_prompt(tokenizer, messages):
+    """Build and tokenize a chat prompt from messages.
+
+    Helper function that applies chat template and tokenizes without
+    adding special tokens (template already includes them).
+
+    Args:
+        tokenizer: Tokenizer with chat template support.
+        messages: List of message dicts with 'role' and 'content' keys.
+
+    Returns:
+        A tuple containing:
+            - prompt_text (str): Formatted chat template string.
+            - prompt_ids (torch.Tensor): Token IDs of shape [T].
+    """
     # IMPORTANT: chat template already includes special tokens
     prompt_text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -369,15 +492,27 @@ def test_completion_logprobs_sanity(
     verbose=True,
     run_generation_check=True,
 ):
-    """
-    Runs the sanity checks:
+    """Run sanity checks on completion log probability computation.
 
-    Check 1: Prompt-only => 0 completion tokens selected
-    Check 2: Single-token completion => exactly 1 completion token selected; sum_logp matches that token logp
-    Check 3: Generation slicing consistency => modifying one completion token changes logprob
+    Verifies that the completion_logprobs function correctly:
+    1. Selects zero completion tokens for prompt-only input
+    2. Correctly scores a single-token completion
+    3. Produces different scores when completion tokens change
 
-    Parameters:
-      completion_logprobs_fn: your function completion_logprobs(model, input_ids, attention_mask, prompt_lens)
+    Args:
+        model: Causal language model.
+        tokenizer: Tokenizer with chat template support.
+        completion_logprobs_fn: Function with signature
+            completion_logprobs(model, input_ids, attention_mask, prompt_lens).
+        device: Device to run tests on (defaults to model.device).
+        verbose: Whether to print detailed check information.
+        run_generation_check: Whether to run check 3 (generation slicing).
+
+    Returns:
+        bool: True if all checks pass.
+
+    Raises:
+        AssertionError: If any sanity check fails.
     """
     if device is None:
         device = model.device
@@ -546,7 +681,23 @@ def test_completion_logprobs_sanity(
 
 
 class RLHFEngine:
+    """Engine for RLHF operations including generation and preference scoring.
+
+    Provides a unified interface for generating completions and computing
+    log probabilities for preference learning tasks like DPO.
+
+    Attributes:
+        model: The causal language model.
+        tokenizer: The tokenizer configured for left padding.
+    """
+
     def __init__(self, model, tokenizer):
+        """Initialize the RLHF engine.
+
+        Args:
+            model: Causal language model.
+            tokenizer: Tokenizer instance (will be configured for left padding).
+        """
         self.model = model
         self.tokenizer = tokenizer
 
@@ -557,6 +708,17 @@ class RLHFEngine:
     def build_prompt(
         self, messages: List[Dict[str, str]]
     ) -> Tuple[str, torch.Tensor, int]:
+        """Build and tokenize a chat prompt from messages.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content' keys.
+
+        Returns:
+            A tuple containing:
+                - prompt_text (str): Formatted chat template string.
+                - prompt_ids_1d (torch.Tensor): 1D token IDs on model device.
+                - prompt_len (int): Number of prompt tokens.
+        """
         prompt_text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -566,6 +728,15 @@ class RLHFEngine:
         return prompt_text, input_ids[0], prompt_len
 
     def generate(self, messages, **gen_kwargs) -> GenOutput:
+        """Generate a completion from chat messages.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content' keys.
+            **gen_kwargs: Arguments passed to generate_one (e.g., max_new_tokens, temperature).
+
+        Returns:
+            GenOutput: Dataclass with prompt, completion text and token IDs.
+        """
         return generate_one(self.model, self.tokenizer, messages, **gen_kwargs)
 
     def _completion_logprobs_from_full_sequence(
@@ -574,6 +745,18 @@ class RLHFEngine:
         attention_mask: torch.Tensor,  # [B, T]
         prompt_lens: torch.Tensor,  # [B]
     ) -> torch.Tensor:
+        """Compute sum log probabilities for completion tokens.
+
+        Internal helper that wraps completion_logprobs and returns only sum_logp.
+
+        Args:
+            input_ids: Token IDs of shape [B, T] containing prompt + completion.
+            attention_mask: Attention mask of shape [B, T].
+            prompt_lens: Number of prompt tokens per example, shape [B].
+
+        Returns:
+            torch.Tensor: Sum of log probs over completion tokens, shape [B].
+        """
         sum_logp, mean_logp, token_logp, mask = completion_logprobs(
             self.model, input_ids, attention_mask, prompt_lens
         )
@@ -584,6 +767,15 @@ class RLHFEngine:
         messages: List[Dict[str, str]],
         completion_ids: torch.Tensor,  # 1D completion token ids
     ) -> float:
+        """Compute log probability of a completion given messages.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content' keys.
+            completion_ids: 1D tensor of completion token IDs.
+
+        Returns:
+            float: Sum of log probabilities over the completion tokens.
+        """
         # Build prompt
         _, prompt_ids_1d, prompt_len = self.build_prompt(messages)
 
@@ -614,15 +806,42 @@ class RLHFEngine:
         chosen_ids: torch.Tensor,
         rejected_ids: torch.Tensor,
     ) -> Tuple[float, float]:
+        """Score a preference pair (chosen vs rejected completions).
+
+        Args:
+            messages: List of message dicts with 'role' and 'content' keys.
+            chosen_ids: 1D tensor of chosen completion token IDs.
+            rejected_ids: 1D tensor of rejected completion token IDs.
+
+        Returns:
+            A tuple containing:
+                - logp_chosen (float): Log probability of chosen completion.
+                - logp_rejected (float): Log probability of rejected completion.
+        """
         # Same prompt for both; score each completion
         logp_chosen = self.logprob_of_completion(messages, chosen_ids)
         logp_rejected = self.logprob_of_completion(messages, rejected_ids)
         return logp_chosen, logp_rejected
 
     def decode_completion(self, completion_ids: torch.Tensor) -> str:
+        """Decode completion token IDs to text.
+
+        Args:
+            completion_ids: Tensor of completion token IDs.
+
+        Returns:
+            str: Decoded text with special tokens preserved.
+        """
         return self.tokenizer.decode(completion_ids, skip_special_tokens=False)
 
     def set_seed(self, seed: int) -> None:
+        """Set random seeds for reproducibility.
+
+        Sets seeds for PyTorch (CPU and CUDA), Python random, and NumPy.
+
+        Args:
+            seed: Random seed value.
+        """
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         random.seed(seed)
@@ -630,6 +849,11 @@ class RLHFEngine:
 
 
 def main():
+    """Run comprehensive tests of the RLHF engine components.
+
+    Tests tokenizer, model loading, generation, and completion log
+    probability computation with sanity checks.
+    """
     device = torch.device(DEVICE)
 
     # basic environment/cuda checks

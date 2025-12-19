@@ -153,19 +153,19 @@ in which we can use the same sample multiple times because the trajectory is sti
 
 PPO also implements a **clipped surrogate objective** to prevent large policy updates that could destabilize training. This is done by clipping the importance sampling ratio $r_t(\theta)$ within a small range around 1 (e.g., [0.8, 1.2]):
 
-$r_t^{clipped}(\theta) = \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)$
+$$r_t^{clipped}(\theta) = \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)$$
 
 This is done because for positive advantages and large $r_t$, the gradient can push us into very greedy policies that overfit to the current batch of data and for negative advantages and small $r_t$, the gradient can push us into very conservative policies by avoiding certain actions altogether. Clipping prevents these extreme updates and keeps the policy changes more stable. 
 
 PPO will combine the results to choose the minimum of the unclipped and clipped objectives:
 
-$L^{PPO}(\theta) = \mathbb{E}_{\pi_{\theta_{old}}} \big[ \min(r_t(\theta) A_t, r_t^{clipped}(\theta) A_t) \big]$
+$$L^{PPO}(\theta) = \mathbb{E}_{\pi_{\theta_{old}}} \big[ \min(r_t(\theta) A_t, r_t^{clipped}(\theta) A_t) \big]$$
 
 Similar to A2C, we will still keep the value loss and entropy bonus:
 
-$L_V = (V(s_t) - R_t)^2$
+$$L_V = (V(s_t) - R_t)^2$$
 
-$L_H = \beta H(\pi)$
+$$L_H = \beta H(\pi)$$
 
 ### Implementation Details
 
@@ -303,11 +303,11 @@ Actions are typically rescaled affinely to match environment bounds; this contri
 
 Rather than fixing $\alpha$, SAC automatically tunes it to maintain a target entropy:
 
-$\mathcal{H}_{\text{target}} \approx -\text{action\_dim}$
+$$\mathcal{H}_{\text{target}} \approx -\text{action\_dim}$$
 
 The temperature parameter is optimized via:
 
-$\mathcal{L}_\alpha = -\mathbb{E}\left[\log \alpha \left(\log \pi_\theta(a|s) + \mathcal{H}_{\text{target}}\right)\right]$
+$$\mathcal{L}_\alpha = -\mathbb{E}\left[\log \alpha \left(\log \pi_\theta(a|s) + \mathcal{H}_{\text{target}}\right)\right]$$
 
 This keeps the policy sufficiently stochastic early in training and nearly deterministic at convergence.
 

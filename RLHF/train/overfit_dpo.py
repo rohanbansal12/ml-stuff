@@ -63,6 +63,15 @@ class TinyPreferenceDataset(Dataset):
 def move_batch_to_device(
     batch: Dict[str, torch.Tensor], device: torch.device
 ) -> Dict[str, torch.Tensor]:
+    """Move all tensors in a batch dictionary to the specified device.
+
+    Args:
+        batch: Dictionary containing tensors and other values.
+        device: Target device for tensors.
+
+    Returns:
+        Dict[str, torch.Tensor]: Batch with tensors moved to device.
+    """
     return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
 
 
@@ -72,18 +81,27 @@ def preference_eval_stats(
     dataloader: DataLoader,
     use_mean_logp: bool = False,
 ) -> Dict[str, float]:
-    """
-    Eval stats for preference pairs.
+    """Compute evaluation statistics for preference pairs.
 
-    Returns both sum-logp and mean-logp diagnostics so you can detect length bias:
-      - win_rate_sum:   P(sum_logp_chosen > sum_logp_rejected)
-      - win_rate_mean:  P(mean_logp_chosen > mean_logp_rejected)
-      - avg_margin_sum: E[sum_logp_chosen - sum_logp_rejected]
-      - avg_margin_mean:E[mean_logp_chosen - mean_logp_rejected]
-      - avg_len_*:      avg completion token counts
-      - avg_len_gap:    avg (len_rejected - len_chosen)
-    `use_mean_logp` controls which win_rate/margin are also reported as the primary
-    `win_rate` / `avg_margin` fields for convenience.
+    Returns both sum-logp and mean-logp diagnostics to detect length bias.
+
+    Args:
+        policy_model: Model to evaluate.
+        dataloader: DataLoader with preference pair batches.
+        use_mean_logp: Whether to use mean logp as primary metric
+            (otherwise uses sum logp).
+
+    Returns:
+        Dict[str, float]: Dictionary containing:
+            - win_rate: Primary win rate (sum or mean based on use_mean_logp).
+            - avg_margin: Primary margin (sum or mean based on use_mean_logp).
+            - win_rate_sum: P(sum_logp_chosen > sum_logp_rejected).
+            - win_rate_mean: P(mean_logp_chosen > mean_logp_rejected).
+            - avg_margin_sum: E[sum_logp_chosen - sum_logp_rejected].
+            - avg_margin_mean: E[mean_logp_chosen - mean_logp_rejected].
+            - avg_chosen_len: Average chosen completion token count.
+            - avg_rejected_len: Average rejected completion token count.
+            - avg_len_gap: Average (rejected_len - chosen_len).
     """
     policy_model.eval()
     device = next(policy_model.parameters()).device
@@ -171,6 +189,15 @@ def preference_eval_stats(
 
 
 def build_tiny_examples(n: int = 100):
+    """Build a small dataset of preference examples from Intel/orca_dpo_pairs.
+
+    Args:
+        n: Number of examples to load.
+
+    Returns:
+        List[Dict[str, Any]]: List of preference examples with messages,
+            chosen, and rejected fields.
+    """
     ds = load_dataset("Intel/orca_dpo_pairs", split="train")
     ds = ds.shuffle(seed=0).select(range(n))
 
@@ -194,6 +221,16 @@ def overfit_dpo(
     tokenizer,
     cfg: OverfitConfig,
 ) -> None:
+    """Run DPO training to overfit on a small dataset.
+
+    Trains a policy model using Direct Preference Optimization on a small
+    subset of data, useful for debugging and sanity checking the training loop.
+
+    Args:
+        policy_model: The model to train.
+        tokenizer: Tokenizer for processing text.
+        cfg: Configuration for overfitting experiment.
+    """
     # load examples
     raw_examples = build_tiny_examples(cfg.n_samples)
 
@@ -248,8 +285,8 @@ def overfit_dpo(
                 grad_clip_norm=cfg.grad_clip_norm,
                 use_mean_logp=cfg.use_mean_logp,
             )
-            # if (step + 1) % cfg.print_every_steps == 0:
-            #     metrics.pretty_print(prefix=f"[epoch {epoch} step {step + 1}] ")
+            if (step + 1) % cfg.print_every_steps == 0:
+                metrics.pretty_print(prefix=f"[epoch {epoch:02d} step {step + 1:04d}] ")
 
             if (step + 1) % cfg.eval_every_steps == 0:
                 tr = preference_eval_stats(
@@ -259,26 +296,31 @@ def overfit_dpo(
                     policy_model, val_loader, use_mean_logp=cfg.use_mean_logp
                 )
 
+                # Print compact eval stats with clear train/val distinction
                 print(
                     f"[epoch {epoch:02d} step {step + 1:04d}] "
-                    f"TRAIN | "
-                    f"WR sum/mean {tr['win_rate_sum']:.2f}/{tr['win_rate_mean']:.2f} | "
-                    f"margin sum/mean {tr['avg_margin_sum']:.1f}/{tr['avg_margin_mean']:.3f} | "
-                    f"len + / - / Δ {tr['avg_chosen_len']:.1f} / {tr['avg_rejected_len']:.1f} / {tr['avg_len_gap']:.1f}"
+                    f"EVAL TRAIN | "
+                    f"wr={tr['win_rate_sum']:.2f}/{tr['win_rate_mean']:.2f} | "
+                    f"margin={tr['avg_margin_sum']:+.1f}/{tr['avg_margin_mean']:+.3f} | "
+                    f"len={tr['avg_chosen_len']:.0f}/{tr['avg_rejected_len']:.0f}"
                 )
                 print(
-                    f"{'':22}"
-                    f"VAL   | "
-                    f"WR sum/mean {va['win_rate_sum']:.2f}/{va['win_rate_mean']:.2f} | "
-                    f"margin sum/mean {va['avg_margin_sum']:.1f}/{va['avg_margin_mean']:.3f} | "
-                    f"len + / - / Δ {va['avg_chosen_len']:.1f} / {va['avg_rejected_len']:.1f} / {va['avg_len_gap']:.1f}"
+                    f"[epoch {epoch:02d} step {step + 1:04d}] "
+                    f"EVAL VAL   | "
+                    f"wr={va['win_rate_sum']:.2f}/{va['win_rate_mean']:.2f} | "
+                    f"margin={va['avg_margin_sum']:+.1f}/{va['avg_margin_mean']:+.3f} | "
+                    f"len={va['avg_chosen_len']:.0f}/{va['avg_rejected_len']:.0f}"
                 )
 
 
 def main():
+    """Main entry point for DPO overfitting experiment.
+
+    Loads model and tokenizer, then runs overfitting training with default config.
+    """
     device = torch.device(DEVICE)
     tokenizer = load_tokenizer(MODEL_NAME)
-    model = load_model(MODEL_NAME, dtype=torch.float32, device=device)
+    model = load_model(MODEL_NAME, dtype=torch.bfloat16, device=device)
     cfg = OverfitConfig()
     overfit_dpo(model, tokenizer, cfg)
 

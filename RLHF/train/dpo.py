@@ -17,7 +17,7 @@ from engine import completion_logprobs
 
 @dataclass
 class DPOBatchMetrics:
-    # Scalars (or [B] vectors) you’ll want for logging/debugging
+    # Scalars (or [B] vectors) you'll want for logging/debugging
     loss: torch.Tensor  # scalar
     dpo_logits: torch.Tensor  # [B]
     margin: torch.Tensor  # [B] = (Δθ - Δref)
@@ -30,51 +30,47 @@ class DPOBatchMetrics:
 
     chosen_token_count: Optional[torch.Tensor] = None  # [B] optional
     rejected_token_count: Optional[torch.Tensor] = None  # [B] optional
+    grad_norm: Optional[torch.Tensor] = None  # scalar, gradient norm before clipping
 
-    def pretty_print(self, prefix: str = "", indent: int = 2) -> None:
+    def pretty_print(self, prefix: str = "") -> None:
+        """Print DPO metrics in a compact, terminal-friendly format.
+
+        Displays the most important training metrics on 1-2 lines for easy monitoring.
+        Key metrics shown:
+        - loss: Training loss value
+        - acc: Preference accuracy (fraction where policy prefers chosen over rejected)
+        - margin: Mean policy advantage (logp_chosen - logp_rejected difference vs reference)
+        - grad_norm: Gradient norm before clipping (if available)
+
+        Args:
+            prefix: String prefix for the output line.
         """
-        Pretty-print batch-level DPO metrics.
-        """
-        sp = " " * indent
+        # Helper to extract scalar values
+        def val(x: torch.Tensor) -> float:
+            return x.detach().item() if x.numel() == 1 else x.detach().mean().item()
 
-        def stat(x: torch.Tensor) -> str:
-            x = x.detach()
-            if x.numel() == 1:
-                return f"{x.item(): .6f}"
-            return (
-                f"mean={x.mean().item(): .4f} "
-                f"std={x.std(unbiased=False).item(): .4f} "
-                f"min={x.min().item(): .4f} "
-                f"max={x.max().item(): .4f}"
-            )
+        loss = val(self.loss)
+        acc = val(self.acc)
+        margin_mean = val(self.margin)
 
-        print(f"{prefix}DPOBatchMetrics")
-        print(f"{prefix}{sp}loss: {stat(self.loss)}")
-        print(f"{prefix}{sp}acc:  {stat(self.acc)}")
-        print()
+        # Build compact output
+        line = f"{prefix}loss={loss:.4f} | acc={acc:.3f} | margin={margin_mean:+.3f}"
 
-        print(f"{prefix}{sp}dpo_logits: {stat(self.dpo_logits)}")
-        print(f"{prefix}{sp}margin:     {stat(self.margin)}")
-        print()
+        # Add grad norm if available
+        if self.grad_norm is not None:
+            grad_norm = val(self.grad_norm)
+            line += f" | grad={grad_norm:.2e}"
 
-        print(f"{prefix}{sp}policy_logp_chosen:   {stat(self.policy_logp_chosen)}")
-        print(f"{prefix}{sp}policy_logp_rejected: {stat(self.policy_logp_rejected)}")
-        print(f"{prefix}{sp}ref_logp_chosen:      {stat(self.ref_logp_chosen)}")
-        print(f"{prefix}{sp}ref_logp_rejected:    {stat(self.ref_logp_rejected)}")
-
-        if self.chosen_token_count is not None:
-            print()
-            print(f"{prefix}{sp}chosen_token_count:   {stat(self.chosen_token_count.float())}")
-
-        if self.rejected_token_count is not None:
-            print(
-                f"{prefix}{sp}rejected_token_count: {stat(self.rejected_token_count.float())}"
-            )
+        print(line)
 
 
 def freeze_model_(model: torch.nn.Module) -> None:
-    """
-    Freeze model params in-place (reference model).
+    """Freeze all model parameters in-place for reference model.
+
+    Sets requires_grad to False for all parameters and puts model in eval mode.
+
+    Args:
+        model: Model to freeze.
     """
     for param in model.parameters():
         param.requires_grad_(False)
@@ -86,15 +82,19 @@ def make_reference_model(
     *,
     method: str = "deepcopy",
 ) -> torch.nn.Module:
-    """
-    Create a frozen reference model.
+    """Create a frozen reference model for DPO training.
 
-    method:
-      - "deepcopy": deep copy policy model (recommended for exact init match)
-      - "load": load separately from checkpoint (optional; requires caller logic)
+    Args:
+        policy_model: The policy model to create reference from.
+        method: Method for creating reference model. Options:
+            - "deepcopy": Deep copy policy model (recommended for exact init match).
+            - "load": Load separately from checkpoint (not implemented).
 
     Returns:
-      ref_model frozen & eval
+        torch.nn.Module: Frozen reference model in eval mode.
+
+    Raises:
+        ValueError: If method is not recognized.
     """
     if method == "deepcopy":
         import copy
@@ -112,24 +112,31 @@ def dpo_loss_batch(
     beta: float,
     use_mean_logp: bool = False,
 ) -> DPOBatchMetrics:
-    """
-    Compute DPO loss for one batch.
+    """Compute DPO loss for one batch.
 
-    Expects `batch` from collate_preference_batch:
-      chosen_input_ids: [B, T]
-      chosen_attention_mask: [B, T]
-      rejected_input_ids: [B, T]
-      rejected_attention_mask: [B, T]
-      prompt_lens: [B]
+    Implements Direct Preference Optimization loss computation. For each example:
+        Δθ   = logπθ(y+|x)  - logπθ(y-|x)
+        Δref = logπref(y+|x) - logπref(y-|x)
+        z    = β * (Δθ - Δref)
+        loss = -log σ(z)
+
+    Args:
+        policy_model: The policy model being trained.
+        ref_model: Frozen reference model for KL constraint.
+        batch: Batch dict from collate_preference_batch containing:
+            - chosen_input_ids: Token IDs for chosen completions, shape [B, T].
+            - chosen_attention_mask: Attention mask for chosen, shape [B, T].
+            - rejected_input_ids: Token IDs for rejected completions, shape [B, T].
+            - rejected_attention_mask: Attention mask for rejected, shape [B, T].
+            - prompt_lens: Number of prompt tokens per example, shape [B].
+        beta: DPO temperature parameter controlling KL penalty strength.
+        use_mean_logp: Whether to use mean log prob (per-token) instead of sum.
 
     Returns:
-      DPOBatchMetrics with loss + useful debug stats.
+        DPOBatchMetrics: Dataclass containing loss and diagnostic statistics.
 
-    DPO math (per example):
-      Δθ   = logπθ(y+|x)  - logπθ(y-|x)
-      Δref = logπref(y+|x) - logπref(y-|x)
-      z    = β * (Δθ - Δref)
-      loss = -log σ(z)
+    Raises:
+        AssertionError: If batch is missing required keys or has invalid shapes.
     """
     # basic batch assertions
     assert "chosen_input_ids" in batch, "Missing 'chosen_input_ids' in batch"
@@ -219,10 +226,22 @@ def dpo_step(
     grad_clip_norm: Optional[float] = None,
     use_mean_logp: bool = False,
 ) -> DPOBatchMetrics:
-    """
-    Single optimization step: forward DPO loss, backward, optimizer step.
+    """Perform a single DPO training step with gradient update.
 
-    Returns metrics for logging.
+    Computes forward pass, backpropagates gradients, optionally clips them,
+    and updates model parameters.
+
+    Args:
+        policy_model: The policy model being trained.
+        ref_model: Frozen reference model.
+        optimizer: Optimizer for updating policy_model.
+        batch: Batch dict from collate_preference_batch.
+        beta: DPO temperature parameter.
+        grad_clip_norm: Optional gradient clipping max norm.
+        use_mean_logp: Whether to use mean log prob instead of sum.
+
+    Returns:
+        DPOBatchMetrics: Metrics from the training step for logging (includes grad_norm).
     """
     policy_model.train()
     ref_model.eval()
@@ -237,7 +256,16 @@ def dpo_step(
 
     optimizer.zero_grad(set_to_none=True)
     metrics.loss.backward()
+
+    # Compute gradient norm before clipping
+    total_norm = torch.nn.utils.clip_grad_norm_(
+        policy_model.parameters(), float('inf')
+    )
+    metrics.grad_norm = total_norm
+
+    # Apply gradient clipping if specified
     if grad_clip_norm is not None:
         torch.nn.utils.clip_grad_norm_(policy_model.parameters(), grad_clip_norm)
+
     optimizer.step()
     return metrics
