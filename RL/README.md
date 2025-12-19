@@ -255,11 +255,11 @@ SAC approximates $Q^\pi$ using two critics $Q_{\phi_1}, Q_{\phi_2}$ and correspo
 
 Given a replay transition $(s,a,r,s',d)$, we sample $a' \sim \pi_\theta(\cdot|s')$ and compute the TD target:
 
-$y = r + \gamma (1-d) \left(\min(Q_{\phi_1'}(s',a'), Q_{\phi_2'}(s',a')) - \alpha \log \pi_\theta(a'|s')\right)$
+$$y = r + \gamma (1-d) \left(\min(Q_{\phi_1'}(s',a'), Q_{\phi_2'}(s',a')) - \alpha \log \pi_\theta(a'|s')\right)$$
 
 Each critic minimizes the mean-squared TD error:
 
-$\mathcal{L}_{Q_i} = \mathbb{E}\left[(Q_{\phi_i}(s,a) - y)^2\right], \quad i \in \{1,2\}$
+$$\mathcal{L}_{Q_i} = \mathbb{E}\left[(Q_{\phi_i}(s,a) - y)^2\right], \quad i \in \{1,2\}$$
 
 Using the minimum over critics reduces overestimation bias and improves stability.
 
@@ -269,11 +269,11 @@ Using the minimum over critics reduces overestimation bias and improves stabilit
 
 The optimal maximum-entropy policy satisfies:
 
-$\pi^*(\cdot|s) \propto \exp\left(\frac{1}{\alpha} Q^*(s,\cdot)\right)$
+$$\pi^*(\cdot|s) \propto \exp\left(\frac{1}{\alpha} Q^*(s,\cdot)\right)$$
 
 Instead of solving this directly, SAC performs gradient descent on the policy parameters $\theta$ using the objective:
 
-$\mathcal{L}_\pi(\theta) = \mathbb{E}_{s\sim\mathcal{D},\,a\sim\pi_\theta}\left[\alpha \log \pi_\theta(a|s) - \min(Q_{\phi_1}(s,a), Q_{\phi_2}(s,a))\right]$
+$$\mathcal{L}_\pi(\theta) = \mathbb{E}_{s\sim\mathcal{D},\,a\sim\pi_\theta}\left[\alpha \log \pi_\theta(a|s) - \min(Q_{\phi_1}(s,a), Q_{\phi_2}(s,a))\right]$$
 
 The $Q$-term encourages high-value actions, while the entropy term prevents premature policy collapse.
 
@@ -283,7 +283,7 @@ The $Q$-term encourages high-value actions, while the entropy term prevents prem
 
 For continuous control, SAC uses a Gaussian policy with tanh squashing:
 
-$u \sim \mathcal{N}(\mu_\theta(s), \sigma_\theta(s)), \qquad a = \tanh(u)$
+$$u \sim \mathcal{N}(\mu_\theta(s), \sigma_\theta(s)), \qquad a = \tanh(u)$$
 
 Sampling uses the reparameterization trick so gradients can flow through the sampled action.
 
@@ -291,7 +291,7 @@ Sampling uses the reparameterization trick so gradients can flow through the sam
 
 Since $a = \tanh(u)$ is a change of variables, the log-probability must be corrected:
 
-$\log \pi_\theta(a|s) = \log \mathcal{N}(u;\mu_\theta(s),\sigma_\theta(s)) - \sum_j \log\left(1 - \tanh^2(u_j)\right)$
+$$\log \pi_\theta(a|s) = \log \mathcal{N}(u;\mu_\theta(s),\sigma_\theta(s)) - \sum_j \log\left(1 - \tanh^2(u_j)\right)$$
 
 This correction is critical for correct entropy estimation and stable learning.
 
@@ -303,7 +303,7 @@ Actions are typically rescaled affinely to match environment bounds; this contri
 
 Rather than fixing $\alpha$, SAC automatically tunes it to maintain a target entropy:
 
-$$\mathcal{H}_{\text{target}} \approx -\text{action\_dim}$$
+$$\mathcal{H}_{\text{target}} \approx -\text{action}\_\text{dim}$$
 
 The temperature parameter is optimized via:
 
@@ -317,7 +317,7 @@ This keeps the policy sufficiently stochastic early in training and nearly deter
 
 To stabilize bootstrapped Q-learning, SAC uses slowly updated target networks:
 
-$\phi_i' \leftarrow \tau \phi_i + (1 - \tau) \phi_i'$
+$$\phi_i' \leftarrow \tau \phi_i + (1 - \tau) \phi_i'$$
 
 with $\tau \ll 1$ (e.g., $0.005$).
 
