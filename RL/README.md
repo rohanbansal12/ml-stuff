@@ -92,9 +92,9 @@ This is the basic idea behind actor-critic methods, where we use a value network
 
 We have now shown that we have 2 extreme ways to estimate the advantage function:
 
-$$ A_t^{MC} = G_t - V_\phi(s_t) $$  (high variance, no bias)
+$A_t^{MC} = G_t - V_\phi(s_t)$  (high variance, no bias)
 
-$$A_t^{(1)} = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)$$ (low variance, high bias)
+$A_t^{(1)} = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)$ (low variance, high bias)
 
 These represent the two extremes of a bias-variance tradeoff, so naturally we want to be able to interpolate between them. This is where **Generalized Advantage Estimation (GAE-λ)** comes in. GAE-λ computes a weighted average of n-step advantage estimates. We first compute the TD residuals (1-step advantages):
 
