@@ -27,12 +27,20 @@ def make_response_mask_label_space(
         Boolean tensor of shape [B, T-1] where True indicates response tokens
         in label space (shifted by 1 from input space).
     """
-    B, T = attention_mask.shape
-    Tm1 = T - 1
-    attn = attention_mask[:, 1:].bool()  # [B, T-1]
-    idx = torch.arange(Tm1, device=attention_mask.device).unsqueeze(0).expand(B, Tm1)
-    start = (prompt_lens - 1).clamp_min(0).unsqueeze(1)  # handle prompt_len==0 defensively
-    return (idx >= start) & attn
+    # Compute real (non-padded) token index for each position in input space
+    real_index_input = attention_mask.cumsum(dim=1) - 1  # [B, T]
+
+    # Completion tokens are those with real_index >= prompt_len (in input space)
+    completion_mask_input = (
+        real_index_input >= prompt_lens.unsqueeze(1)
+    ) & attention_mask.bool()  # [B, T]
+
+    # Shift to label space (labels are for positions 1..T, so take [:, 1:])
+    # Also ensure attention is valid in label space
+    attn_label = attention_mask[:, 1:].bool()  # [B, T-1]
+    completion_mask_label = completion_mask_input[:, 1:] & attn_label  # [B, T-1]
+
+    return completion_mask_label
 
 def collate_preference_batch(
     tokenizer,

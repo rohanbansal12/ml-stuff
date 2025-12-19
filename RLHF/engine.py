@@ -277,29 +277,36 @@ def completion_logprobs(model, input_ids, attention_mask, prompt_lens):
     attention_mask: [B, T] 1 real, 0 pad
     prompt_lens:    [B] number of prompt tokens per example (int)
     """
+    position_ids = attention_mask.long().cumsum(dim=1) - 1
+    position_ids = position_ids.clamp_min(0)
+
     with torch.no_grad():
-        out = model(input_ids=input_ids, attention_mask=attention_mask)
+        out = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
         logits = out.logits
 
     logits = logits[:, :-1, :]  # [B, T-1, V]
     labels = input_ids[:, 1:]  # [B, T-1]
     attn = attention_mask[:, 1:]  # [B, T-1]
 
-    logp_all = F.log_softmax(logits, dim=-1)  # [B, T-1, V]
+    logp_all = F.log_softmax(logits.float(), dim=-1)  # [B, T-1, V]
     token_logp = logp_all.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(
         -1
     )  # [B, T-1]
 
-    B, Tm1 = labels.shape
-    idx = (
-        torch.arange(Tm1, device=input_ids.device).unsqueeze(0).expand(B, Tm1)
-    )  # [B, T-1]
-    start = (prompt_lens - 1).unsqueeze(1)  # [B, 1]
+    real_index_input = attention_mask.cumsum(dim=1) - 1  # [B, T]
+    # completion tokens are those with real_index >= prompt_len (in input space)
+    completion_mask_input = (
+        real_index_input >= prompt_lens.unsqueeze(1)
+    ) & attention_mask.bool()  # [B, T]
 
-    completion_mask = (idx >= start) & (attn.bool())  # [B, T-1]
+    # token_logp is label-space for tokens at input positions 1..T-1
+    completion_mask = completion_mask_input[:, 1:] & attn.bool()  # [B, T-1]
 
     sum_logp = (token_logp * completion_mask).sum(dim=1)
-
     denom = completion_mask.sum(dim=1).clamp_min(1)
     mean_logp = sum_logp / denom
 
