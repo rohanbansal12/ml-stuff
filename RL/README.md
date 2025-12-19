@@ -269,11 +269,11 @@ Using the minimum over critics reduces overestimation bias and improves stabilit
 
 The optimal maximum-entropy policy satisfies:
 
-$$\pi^*(\cdot|s) \propto \exp\left(\frac{1}{\alpha} Q^{*}(s,\cdot)\right)$$
+$$\pi^*(\cdot|s) \propto \exp\left(\frac{1}{\alpha} Q^{\text{*}}(s,\cdot)\right)$$
 
 Instead of solving this directly, SAC performs gradient descent on the policy parameters $\theta$ using the objective:
 
-$$\mathcal{L}_\pi(\theta) = \mathbb{E}_{s\sim\mathcal{D},\,a\sim\pi_\theta}\left[\alpha \log \pi_\theta(a|s) - \min(Q_{\phi_1}(s,a), Q_{\phi_2}(s,a))\right]$$
+$$\mathcal{L}_\pi(\theta) = \mathbb{E}_{s\sim\mathcal{D},a\sim\pi_\theta}\left[\alpha \log \pi_\theta(a|s) - \min(Q_{\phi_1}(s,a), Q_{\phi_2}(s,a))\right]$$
 
 The $Q$-term encourages high-value actions, while the entropy term prevents premature policy collapse.
 
