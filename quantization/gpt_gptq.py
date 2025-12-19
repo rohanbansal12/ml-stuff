@@ -1,6 +1,5 @@
 import torch
 import copy
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from ptq_utils import (
     evaluate_simple,
     get_batch_1d,
@@ -14,13 +13,11 @@ from ptq_utils import (
     attach_one_linear_input_hook,
     set_module_by_name,
     get_module_by_name,
-    GPTQLinear
+    GPTQLinear,
+    load_model,
+    create_layer_filter,
+    setup_eval_data,
 )
-
-import sys
-
-sys.path.append(".")
-from GPT.utils import load_shakespeare
 
 
 # -----------------------------
@@ -35,7 +32,10 @@ CALIBRATION_BATCHES = 4
 EVALUATION_BATCHES = 50
 SEED = 25
 
-TEXT_PATH = "/workspace/ml-stuff/data/shakespeare.txt"
+# Dataset config
+DATASET_NAME = "wikitext"
+DATASET_CONFIG = "wikitext-2-raw-v1"
+DATASET_SPLIT = "test"
 
 MAX_X_ROWS = 2048
 DAMP_RATIO = 1e-2
@@ -330,16 +330,17 @@ def get_target_linear_names_in_order(model, include, exclude):
         names.append(name)
     return names
 
+
 @torch.no_grad()
-def run_gptq_streaming_sequential(q_model, tokens_1d, device, include, exclude, s=''):
+def run_gptq_streaming_sequential(q_model, tokens_1d, device, include_filter, exclude_filter, label=''):
     q_model.eval()
 
     # decide layer order once (stable, forward-ish)
-    layer_names = get_target_linear_names_in_order(q_model, include, exclude)
+    layer_names = get_target_linear_names_in_order(q_model, include_filter, exclude_filter)
 
-    print(f"Found {len(layer_names)} {s} layers")
+    print(f"Found {len(layer_names)} {label} layers")
 
-    for li, name in enumerate(layer_names, 1):
+    for name in layer_names:
         # 1) collect Hessian for THIS layer on the CURRENT q_model
         agg = HessianAgg(store_on_cpu=True, max_rows=MAX_X_ROWS, dtype=torch.float64)
         h = attach_one_linear_input_hook(q_model, name, agg)
@@ -366,11 +367,8 @@ def run_gptq_streaming_sequential(q_model, tokens_1d, device, include, exclude, 
         # 3) cleanup
         del agg
         del H
-        # if li % 4 == 0 or li == len(layer_names):
-        #     print(f"Processed {li}/{len(layer_names)} layers")
 
     return q_model
-
 
 
 # -----------------------------
@@ -385,30 +383,13 @@ def main():
     print("Using device:", device)
     print("Loading:", MODEL_NAME)
 
-    tok = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+    val_tokens, full_eval_data = setup_eval_data(
+        MODEL_NAME, DATASET_NAME, DATASET_CONFIG, DATASET_SPLIT,
+        BATCH_SIZE, MAX_SEQ_LEN, EVALUATION_BATCHES, SEED, device
+    )
 
-    fp_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        dtype=torch.float16 if device.type == "cuda" else torch.float32,
-    ).to(device)
-    fp_model.eval()
-
-    text = load_shakespeare(TEXT_PATH)
-    enc = tok(text, return_tensors="pt")
-    tokens = enc["input_ids"][0].to(device)
-    split = int(0.9 * tokens.numel())
-    val_tokens = tokens[split:]
-
-    # fixed eval set
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-
-    full_eval_data = []
-    for _ in range(EVALUATION_BATCHES):
-        x, y = get_batch_1d(val_tokens, BATCH_SIZE, MAX_SEQ_LEN, device=device)
-        full_eval_data.append((x, y))
-
+    # Evaluate baseline models
+    fp_model = load_model(MODEL_NAME, device)
     fp_loss, fp_ppl = evaluate_simple(fp_model, full_eval_data)
     print(f"FP:    Loss:{fp_loss:.6f} | Perp:{fp_ppl:.6f}")
 
@@ -418,47 +399,18 @@ def main():
     loss, perp = evaluate_simple(fp32g_model, full_eval_data)
     print(f"FP32:  Loss:{loss:.6f} | Perp:{perp:.6f}")
 
-
-    fp_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        dtype=torch.float16 if device.type == "cuda" else torch.float32,
-    ).to(device)
-    include_linear = lambda x: x.endswith("fc1")
-    q_model = run_gptq_streaming_sequential(fp_model, val_tokens, device, include_linear, exclude, s="fc1")
+    # Evaluate GPTQ on different layer groups
+    include_fc1 = create_layer_filter(["fc1"])
+    fp_model = load_model(MODEL_NAME, device)
+    q_model = run_gptq_streaming_sequential(fp_model, val_tokens, device, include_fc1, exclude, label="fc1")
     loss, perp = evaluate_simple(q_model, full_eval_data)
     print(f"GPTQ fc1:  Loss:{loss:.6f} | Perp:{perp:.6f}")
 
-    fp_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        dtype=torch.float16 if device.type == "cuda" else torch.float32,
-    ).to(device)
-    include_linear = lambda x: x.endswith("fc2")
-    q_model = run_gptq_streaming_sequential(fp_model, val_tokens, device, include_linear, exclude, s='fc2')
+    include_fc2 = create_layer_filter(["fc2"])
+    fp_model = load_model(MODEL_NAME, device)
+    q_model = run_gptq_streaming_sequential(fp_model, val_tokens, device, include_fc2, exclude, label='fc2')
     loss, perp = evaluate_simple(q_model, full_eval_data)
     print(f"GPTQ fc2:  Loss:{loss:.6f} | Perp:{perp:.6f}")
-
-    # # testing the GPTQ logic on a single row
-    # act_map = collect_fc1_activations(fp_model, val_tokens, device)
-    # print(f"Collected X for {len(act_map)} fc1 layers")
-
-    # layer_name = "model.decoder.layers.1.fc1"
-    # layer = get_module_by_name(fp_model, layer_name)
-    # W = layer.weight.detach().float()
-    # w0 = W[0]
-    # X = act_map[layer_name]
-    # X64 = X.double()
-    # H = (X64.T @ X64) / X64.size(0)
-
-    # w_naive, w_q, s_w = naive_quantize_row_w4_grouped(
-    #     w0, group_size=32, qmax=7, eps=1e-8
-    # )
-    # print(row_metrics(w0, w_naive))
-    # print(row_metrics_weighted(w0, w_naive, H))
-    # w_gptq, info = quantize_gptq_row(
-    #     w0, H, bits=4, group_size=32, qmin=-7, qmax=7, eps=1e-8, act_order=False
-    # )
-    # print(row_metrics(w0, w_gptq))
-    # print(row_metrics_weighted(w0, w_gptq, H))
 
 
 

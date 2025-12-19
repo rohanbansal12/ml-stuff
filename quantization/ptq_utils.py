@@ -1022,3 +1022,55 @@ def compare_outputs(
             print(f"WARNING: {name} contains NaNs")
         if torch.isinf(y).any():
             print(f"WARNING: {name} contains Infs")
+
+
+# -----------------------------
+# Common utility functions
+# -----------------------------
+
+def load_model(model_name, device):
+    """Load and return the model with appropriate dtype."""
+    from transformers import AutoModelForCausalLM
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    model = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype).to(device)
+    model.eval()
+    return model
+
+
+def create_layer_filter(layer_names):
+    """Create a filter function that checks if a layer name ends with any of the specified names."""
+    def filter_fn(name):
+        return any(name.endswith(layer_name) for layer_name in layer_names)
+    return filter_fn
+
+
+def setup_eval_data(model_name, dataset_name, dataset_config, dataset_split, batch_size, max_seq_len, evaluation_batches, seed, device):
+    """Load tokenizer, prepare validation data, and create eval batches."""
+    from transformers import AutoTokenizer
+    from datasets import load_dataset
+
+    tok = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+
+    # Load dataset from HuggingFace
+    dataset = load_dataset(dataset_name, dataset_config, split=dataset_split)
+
+    # Concatenate all text with newlines
+    text = "\n\n".join(dataset["text"])
+
+    # Tokenize
+    enc = tok(text, return_tensors="pt")
+    tokens = enc["input_ids"][0].to(device)
+
+    # Use all tokens for evaluation (test split is already separate)
+    val_tokens = tokens
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    full_eval_data = []
+    for _ in range(evaluation_batches):
+        x, y = get_batch_1d(val_tokens, batch_size, max_seq_len, device=device)
+        full_eval_data.append((x, y))
+
+    return val_tokens, full_eval_data

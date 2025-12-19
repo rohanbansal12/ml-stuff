@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import copy
 import time
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from ptq_utils import (
     evaluate_simple,
     get_batch_1d,
@@ -15,12 +14,10 @@ from ptq_utils import (
     set_module_by_name,
     quantize_model_w4,
     AWQW4Packed,
+    load_model,
+    create_layer_filter,
+    setup_eval_data,
 )
-
-import sys
-
-sys.path.append(".")
-from GPT.utils import load_shakespeare
 
 
 # -----------------------------
@@ -29,13 +26,16 @@ from GPT.utils import load_shakespeare
 MODEL_NAME = "facebook/opt-1.3b"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-BATCH_SIZE = 8
-MAX_SEQ_LEN = 128
+BATCH_SIZE = 16
+MAX_SEQ_LEN = 512
 CALIBRATION_BATCHES = 2
 EVALUATION_BATCHES = 50
 SEED = 25
 
-TEXT_PATH = "/workspace/ml-stuff/data/shakespeare.txt"
+# Dataset config
+DATASET_NAME = "wikitext"
+DATASET_CONFIG = "wikitext-2-raw-v1"
+DATASET_SPLIT = "test"
 
 MAX_X_ROWS = 1024
 GROUP_SIZE = 32
@@ -203,7 +203,7 @@ class SaliencyAgg:
         return stats_dict
 
 
-def quantize_model_awq(model, scale_stats, include, exclude, packed=False):
+def quantize_model_awq(model, scale_stats, include, exclude):
     to_replace = []
     for name, mod in model.named_modules():
         if isinstance(mod, nn.Linear):
@@ -219,32 +219,25 @@ def quantize_model_awq(model, scale_stats, include, exclude, packed=False):
     return model
 
 
-def eval_harness(tokens, full_eval_data, device, include, exclude, s=""):
-    fp_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        dtype=torch.float16 if device.type == "cuda" else torch.float32,
-    ).to(device)
-    fp_model.eval()
-
-    q_model = quantize_model_w4(fp_model, GROUP_SIZE, include, exclude)
+def eval_harness(tokens, full_eval_data, device, include_filter, exclude_filter, label=""):
+    # Baseline W4 quantization
+    fp_model = load_model(MODEL_NAME, device)
+    q_model = quantize_model_w4(fp_model, GROUP_SIZE, include_filter, exclude_filter)
     loss, perp, t_w4, r_w4 = time_evaluate_simple(
-        q_model, full_eval_data, device, label=f"W4 {s}"
+        q_model, full_eval_data, device, label=f"W4 {label}"
     )
-    print(f"W4 {s}:  Loss:{loss:.6f} | Perp:{perp:.6f}")
+    print(f"W4 {label}:  Loss:{loss:.6f} | Perp:{perp:.6f}")
 
-    fp_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        dtype=torch.float16 if device.type == "cuda" else torch.float32,
-    ).to(device)
-    fp_model.eval()
+    # AWQ quantization
+    fp_model = load_model(MODEL_NAME, device)
     saliency_stats = compute_saliency_stats(
         fp_model,
         tokens,
         BATCH_SIZE,
         MAX_SEQ_LEN,
         device,
-        include=include,
-        exclude=exclude,
+        include=include_filter,
+        exclude=exclude_filter,
     )
     scale_dict = scaling_search(
         fp_model,
@@ -254,12 +247,12 @@ def eval_harness(tokens, full_eval_data, device, include, exclude, s=""):
         smin=0.1,
         smax=10.0,
     )
-    q_model = quantize_model_awq(fp_model, scale_dict, include, exclude, packed=True)
+    q_model = quantize_model_awq(fp_model, scale_dict, include_filter, exclude_filter)
     warmup_triton_for_eval(q_model, full_eval_data, device, iters=2, do_loss=False)
     loss, perp, t_awq, r_awq = time_evaluate_simple(
-        q_model, full_eval_data, device, label=f"AWQ4Packed {s}"
+        q_model, full_eval_data, device, label=f"AWQ4Packed {label}"
     )
-    print(f"AWQ4Packed {s}:  Loss:{loss:.6f} | Perp:{perp:.6f}")
+    print(f"AWQ4Packed {label}:  Loss:{loss:.6f} | Perp:{perp:.6f}")
 
     print(
         f"Speedup (AWQ4Packed vs W4): {t_w4 / t_awq:.2f}x (time), {r_awq / r_w4:.2f}x (tok/s)"
@@ -278,32 +271,14 @@ def main():
     print("Using device:", device)
     print("Loading:", MODEL_NAME)
 
-    tok = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+    val_tokens, full_eval_data = setup_eval_data(
+        MODEL_NAME, DATASET_NAME, DATASET_CONFIG, DATASET_SPLIT,
+        BATCH_SIZE, MAX_SEQ_LEN, EVALUATION_BATCHES, SEED, device
+    )
 
-    fp_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        dtype=torch.float16 if device.type == "cuda" else torch.float32,
-    ).to(device)
-    fp_model.eval()
-
-    text = load_shakespeare(TEXT_PATH)
-    enc = tok(text, return_tensors="pt")
-    tokens = enc["input_ids"][0].to(device)
-    split = int(0.9 * tokens.numel())
-    val_tokens = tokens[split:]
-
-    # fixed eval set
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-
-    full_eval_data = []
-    for _ in range(EVALUATION_BATCHES):
-        x, y = get_batch_1d(val_tokens, BATCH_SIZE, MAX_SEQ_LEN, device=device)
-        full_eval_data.append((x, y))
-
-    # fp_loss, fp_ppl = evaluate_simple(fp_model, full_eval_data)
-    fp_loss, fp_ppl, t_w4, r_w4 = time_evaluate_simple(
+    # Evaluate baseline models
+    fp_model = load_model(MODEL_NAME, device)
+    fp_loss, fp_ppl, _, _ = time_evaluate_simple(
         fp_model, full_eval_data, device, label="FP"
     )
     print(f"FP:    Loss:{fp_loss:.6f} | Perp:{fp_ppl:.6f}")
@@ -314,39 +289,14 @@ def main():
     loss, perp = evaluate_simple(fp32g_model, full_eval_data)
     print(f"FP32:  Loss:{loss:.6f} | Perp:{perp:.6f}")
 
-    include_linear = lambda x: x.endswith("fc1")
-    eval_harness(val_tokens, full_eval_data, device, include_linear, exclude, "fc1")
+    # Evaluate AWQ on different layer groups
+    include_fc1 = create_layer_filter(["fc1"])
+    eval_harness(val_tokens, full_eval_data, device, include_fc1, exclude, "fc1")
 
-    include_linear = lambda x: x.endswith("fc1") or x.endswith("fc2")
-    eval_harness(val_tokens, full_eval_data, device, include_linear, exclude, "MLP")
+    include_mlp = create_layer_filter(["fc1", "fc2"])
+    eval_harness(val_tokens, full_eval_data, device, include_mlp, exclude, "MLP")
 
     eval_harness(val_tokens, full_eval_data, device, include, exclude, "full")
-
-    # include_linear = lambda x: x.endswith("fc1")
-    # fp_model = AutoModelForCausalLM.from_pretrained(
-    #     MODEL_NAME,
-    #     dtype=torch.float16 if device.type == "cuda" else torch.float32,
-    # ).to(device)
-    # fp_model.eval()
-    # saliency_stats = compute_saliency_stats(
-    #     fp_model,
-    #     tokens,
-    #     BATCH_SIZE,
-    #     MAX_SEQ_LEN,
-    #     device,
-    #     include=include_linear,
-    #     exclude=exclude,
-    # )
-    # layer_name = list(saliency_stats.keys())[0]
-    # layer = get_module_by_name(fp_model, layer_name)
-    # K = layer.in_features
-    # q = AWQW4Packed.from_float(layer, torch.ones((K, ), device=device), GROUP_SIZE)
-    # x = saliency_stats[layer_name]['act_batch'].to(device)
-    # y_slow = q.forward(x)
-    # print(x.shape, y_slow.shape)
-    # y_tri  = q.forward_triton_debug(x)
-    # print(y_tri.shape)
-    # compare_outputs(y_slow, y_tri)
 
 
 if __name__ == "__main__":
