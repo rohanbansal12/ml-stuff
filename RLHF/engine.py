@@ -59,7 +59,7 @@ def env_info():
     return dtype
 
 
-def load_tokenizer(model_name):
+def load_tokenizer(model_name, verbose=False):
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -68,19 +68,22 @@ def load_tokenizer(model_name):
     tokenizer.padding_side = "left"
     tokenizer.truncation_side = "left"
 
-    # Identify special tokens
-    print("\nTokenizer Special Tokens:")
-    print(f"  BOS token: {tokenizer.bos_token} (ID: {tokenizer.bos_token_id})")
-    print(f"  EOS token: {tokenizer.eos_token} (ID: {tokenizer.eos_token_id})")
+    if verbose:
+        # Identify special tokens
+        print("\nTokenizer Special Tokens:")
+        print(f"  BOS token: {tokenizer.bos_token} (ID: {tokenizer.bos_token_id})")
+        print(f"  EOS token: {tokenizer.eos_token} (ID: {tokenizer.eos_token_id})")
 
     # Check if padding token exists
     if tokenizer.pad_token is not None:
-        print(f"  PAD token: {tokenizer.pad_token} (ID: {tokenizer.pad_token_id})")
+        if verbose:
+            print(f"  PAD token: {tokenizer.pad_token} (ID: {tokenizer.pad_token_id})")
     else:
-        print("  PAD token: Not set")
-        print("  → Setting pad_token = eos_token")
         tokenizer.pad_token = tokenizer.eos_token
-        print(f"  PAD token: {tokenizer.pad_token} (ID: {tokenizer.pad_token_id})")
+        if verbose:
+            print("  PAD token: Not set")
+            print("  → Setting pad_token = eos_token")
+            print(f"  PAD token: {tokenizer.pad_token} (ID: {tokenizer.pad_token_id})")
 
     return tokenizer
 
@@ -271,7 +274,7 @@ def generate_test(model, tokenizer):
     assert not torch.equal(y1.completion_ids, y2.completion_ids)
 
 
-def completion_logprobs(model, input_ids, attention_mask, prompt_lens):
+def completion_logprobs(model, input_ids, attention_mask, prompt_lens, require_grad = False):
     """
     input_ids:      [B, T] prompt+completion (padded)
     attention_mask: [B, T] 1 real, 0 pad
@@ -280,7 +283,8 @@ def completion_logprobs(model, input_ids, attention_mask, prompt_lens):
     position_ids = attention_mask.long().cumsum(dim=1) - 1
     position_ids = position_ids.clamp_min(0)
 
-    with torch.no_grad():
+    ctx = torch.enable_grad() if require_grad else torch.no_grad()
+    with ctx:
         out = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -632,7 +636,7 @@ def main():
     dtype = env_info()
 
     # load tokenizer
-    tok = load_tokenizer(MODEL_NAME)
+    tok = load_tokenizer(MODEL_NAME, verbose=True)
     tokenizer_test(tok)
 
     # load model
