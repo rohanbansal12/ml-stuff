@@ -4,6 +4,8 @@ import seaborn as sns
 import torch
 import pandas as pd
 from tqdm import tqdm
+from pathlib import Path
+import numpy as np
 
 
 MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
@@ -49,31 +51,43 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, quantization_config=quantization_config,).to(device)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 
+    out_dir = Path("/workspace/ml-stuff/moe-surgery/plots/baseline")
+    out_dir.mkdir(exist_ok=True, parents=True)
+
     # attach input hooks to the model
+    num_layers = len(model.model.layers)
     for i, layer in enumerate(model.model.layers):
         if hasattr(layer.mlp, 'gate'):
             layer.mlp.gate.register_forward_hook(get_router_hook(i))
 
-    usage_data = {}
     for key, prompt in tqdm(PROMPTS.items(), desc="enumerating prompts"):
+        routing_data.clear()
+
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
         with torch.no_grad():
             _ = model.generate(**inputs, max_new_tokens=50)
 
-        layer_0_data = torch.cat(routing_data[0], dim=0)
-        expert_usage = layer_0_data.argmax(dim=-1).float().histc(bins=60, min=0, max=59)
-        usage_data[key] = expert_usage
-        routing_data.clear()
+        heatmap_matrix = np.zeros((num_layers, 60))
 
+        for layer_idx, data_list in routing_data.items():
+            layer_logits = torch.cat(data_list, dim=0) 
+            usage_counts = layer_logits.argmax(dim=-1).bincount(minlength=60).numpy()
+            if usage_counts.sum() > 0:
+                heatmap_matrix[layer_idx] = usage_counts / usage_counts.sum()
 
-    df = histc_dict_to_df_intx(usage_data, normalize=True)
-
-    plt.figure(figsize=(12, 5))
-    ax = sns.lineplot(data=df, x="cls", y="p", hue="key", marker="o")
-    ax.set_xlabel("Expert ID")
-    ax.set_ylabel("token density")
-    ax.set_title("Expert Usage Frequency (Layer 0)")
-    ax.set_xticks(range(0, 60, 5))
-    plt.tight_layout()
-    plt.savefig(f"/workspace/ml-stuff/moe-surgery/plots/baseline.pdf")
+        # Plotting
+        plt.figure(figsize=(15, 8))
+        sns.heatmap(
+            heatmap_matrix, 
+            cmap="viridis", 
+            xticklabels=5, # Label every 5th expert
+            yticklabels=2, # Label every 2nd layer
+            cbar_kws={'label': 'Selection Probability'}
+        )
+        plt.title(f"Expert Activation Fingerprint: '{key}'")
+        plt.xlabel("Expert ID")
+        plt.ylabel("Layer Depth (0=Input, 31=Output)")
+        plt.tight_layout()
+        plt.savefig(out_dir / f"heatmap_{key}.jpeg")
+        plt.close()

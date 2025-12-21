@@ -1,0 +1,35 @@
+[project]
+name = "ml-stuff"
+version = "0.1.0"
+description = "Modern ML research implementations"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "transformers>=4.30.0",
+    "datasets>=2.0.0",
+    "accelerate>=0.20.0",
+    "bitsandbytes>=0.41.0",
+    "matplotlib>=3.5.0",
+    "seaborn>=0.12.0",
+    "pandas>=2.0.0",
+    "tqdm>=4.65.0",
+    "tensorboard>=2.10.0",
+    "einops>=0.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+# For GPU instances, you might want to specify PyTorch index
+# Uncomment and modify based on your CUDA version:
+# index-url = "https://download.pytorch.org/whl/cu121"
