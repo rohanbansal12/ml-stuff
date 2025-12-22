@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import numpy as np
-from typing import Dict, Optional, Any, Union, Iterable
+from typing import Dict, Optional, Any
 from pathlib import Path
 import seaborn as sns
 import matplotlib.pyplot as plt
 import math
-from contextlib import contextmanager
 
 
 def _safe_entropy_from_dist(p: np.ndarray, eps: float = 1e-12) -> float:
@@ -418,72 +417,177 @@ def plot_ablation_dashboard(
     plt.close(fig)
 
 
-# -----------------------------
-# Ablation hook
-# -----------------------------
+def plot_alpha_sweep_curves(
+    *,
+    sweep_results: Dict[float, Dict[str, Any]],
+    out_dir: Path,
+    prompt_key: str,
+    suffix: str = "",
+    tag: str = "decode",
+) -> None:
+    """Generates and saves routing diversity curves across temperature scaling values.
 
-MaskSpec = Union[int, Iterable[int]]
-
-
-@contextmanager
-def ablate_experts(
-    layer_att, expert_mask_by_layer: Dict[int, MaskSpec], *, neg: float = -1e9
-):
-    """Context manager for temporarily masking (ablating) experts in router logits.
-
-    Registers forward hooks on specified layers to set masked expert logits to a large
-    negative value, effectively preventing those experts from being selected by the router.
-    The hooks are automatically removed when exiting the context.
+    Creates a three-panel figure showing how routing metrics change across different
+    alpha (temperature scaling) values for a single prompt. Includes effective experts,
+    top-1 share, and entropy curves.
 
     Args:
-        layer_att: The model's layer attribute object containing MoE layers with gate modules.
-        expert_mask_by_layer: Dictionary mapping layer indices to expert IDs to mask.
-            Values can be either a single expert ID (int) or an iterable of expert IDs.
-        neg: Large negative value to assign to masked expert logits. Defaults to -1e9.
-
-    Yields:
-        None. The context is active while forward hooks are registered.
-
-    Example:
-        >>> with ablate_experts(model, {0: 5, 1: [3, 7]}):
-        >>>     output = model(input)  # Expert 5 in layer 0 and experts 3,7 in layer 1 are masked
+        sweep_results: Dictionary mapping alpha values to their metrics. Each value
+            should be a dict with "prefill_metrics" and "decode_metrics" keys containing
+            metric dictionaries from compute_metrics_from_counts.
+        out_dir: Directory path where the plot will be saved.
+        prompt_key: Identifier for the prompt (used in title and filename).
+        suffix: Optional suffix to append to the title. Defaults to "".
+        tag: Which phase to plot - either "prefill" or "decode". Defaults to "decode".
     """
-    handles = []
+    import matplotlib.pyplot as plt
+    import numpy as np
 
-    def make_hook(layer_idx: int, mask_spec: MaskSpec):
-        if isinstance(mask_spec, int):
-            mask_list = [mask_spec]
-        else:
-            mask_list = list(mask_spec)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        def hook(module, inputs, output):
-            if isinstance(output, tuple):
-                logits = output[0]
-                rest = output[1:]
-            else:
-                logits = output
-                rest = None
+    alphas = sorted(sweep_results.keys())
+    for a in alphas:
+        m = sweep_results[a][f"{tag}_metrics"]
+        print(
+            f"[{prompt_key}][{tag}] α={a:g} "
+            f"mean_eff={float(np.mean(m['eff_experts'])):.4f} "
+            f"mean_top1={float(np.mean(m['top1_share'])):.4f} "
+            f"mean_ent={float(np.mean(m['entropy_load'])):.4f} "
+            f"mean_pmax={(float(np.mean(m['mean_pmax'])) if m.get('mean_pmax') is not None else -1):.4f} "
+            f"mean_margin={(float(np.mean(m['mean_margin'])) if m.get('mean_margin') is not None else -1):.4f}"
+        )
 
-            logits2 = logits.clone()
-            for e in mask_list:
-                logits2[..., e] = neg
+    # assume all alphas have same number of layers
+    first_alpha = alphas[0]
+    metrics0 = sweep_results[first_alpha][f"{tag}_metrics"]
+    L = len(metrics0["eff_experts"])
+    layers = np.arange(L)
 
-            if rest is None:
-                return logits2
-            return (logits2, *rest)
+    fig, axes = plt.subplots(
+        3, 1, figsize=(14, 12), sharex=True, constrained_layout=True
+    )
 
-        return hook
+    # -----------------------
+    # Effective experts
+    # -----------------------
+    for alpha in alphas:
+        m = sweep_results[alpha][f"{tag}_metrics"]
+        axes[0].plot(
+            layers,
+            m["eff_experts"],
+            label=f"α={alpha:g}",
+        )
 
-    for i, layer in enumerate(layer_att.model.layers):
-        if hasattr(layer.mlp, "gate") and i in expert_mask_by_layer:
-            handles.append(
-                layer.mlp.gate.register_forward_hook(
-                    make_hook(i, expert_mask_by_layer[i])
-                )
-            )
+    axes[0].set_ylabel("Effective experts = exp(entropy)")
+    axes[0].set_title("Routing diversity (decode)")
+    axes[0].legend(ncol=3)
 
-    try:
-        yield
-    finally:
-        for h in handles:
-            h.remove()
+    # -----------------------
+    # Top-1 share (collapse proxy)
+    # -----------------------
+    for alpha in alphas:
+        m = sweep_results[alpha][f"{tag}_metrics"]
+        axes[1].plot(
+            layers,
+            m["top1_share"],
+            label=f"α={alpha:g}",
+        )
+
+    axes[1].set_ylabel("Top-1 expert share")
+    axes[1].set_title("Load concentration")
+
+    # -----------------------
+    # Entropy
+    # -----------------------
+    for alpha in alphas:
+        m = sweep_results[alpha][f"{tag}_metrics"]
+        axes[2].plot(
+            layers,
+            m["entropy_load"],
+            label=f"α={alpha:g}",
+        )
+
+    axes[2].set_ylabel("Entropy(load)")
+    axes[2].set_xlabel("Layer depth")
+    axes[2].set_title("Routing entropy")
+
+    title_suffix = f" ({suffix})" if suffix else ""
+    fig.suptitle(
+        f"Router temperature sweep ({tag}) — '{prompt_key}'{title_suffix}",
+        fontsize=16,
+    )
+
+    fig.savefig(
+        out_dir / f"alpha_sweep_curves_{tag}_{prompt_key}.jpeg",
+        dpi=150,
+    )
+    plt.close(fig)
+
+
+def plot_alpha_sweep_scalar_summary(
+    *,
+    all_results: Dict[str, Dict[float, Dict[str, Any]]],
+    out_dir: Path,
+    suffix: str = "",
+    tag: str = "decode",
+) -> None:
+    """Generates and saves a summary plot of routing collapse across prompts and alphas.
+
+    Creates a single plot showing mean effective experts versus alpha (temperature scaling)
+    for multiple prompts. This allows comparison of how different prompts respond to
+    temperature scaling and identification of routing collapse trends.
+
+    Args:
+        all_results: Nested dictionary structure mapping prompt keys to alpha sweep results.
+            Structure: {prompt_key: {alpha: {"prefill_metrics": {...}, "decode_metrics": {...}}}}.
+            Each metrics dict should come from compute_metrics_from_counts.
+        out_dir: Directory path where the plot will be saved.
+        suffix: Optional suffix to append to the title. Defaults to "".
+        tag: Which phase to plot - either "prefill" or "decode". Defaults to "decode".
+
+    Note:
+        The x-axis will use logarithmic scale if the ratio of max/min alpha is >= 4,
+        otherwise it uses linear scale.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
+
+    for prompt_key, sweep in all_results.items():
+        alphas = sorted(sweep.keys())
+        means = []
+
+        for alpha in alphas:
+            m = sweep[alpha][f"{tag}_metrics"]
+            eff = m["eff_experts"]
+            means.append(float(np.mean(eff)))
+
+        ax.plot(
+            alphas,
+            means,
+            marker="o",
+            label=prompt_key,
+        )
+
+    ax.set_xscale("log" if max(alphas) / min(alphas) >= 4 else "linear")
+    ax.set_xlabel("Router logit scale α")
+    ax.set_ylabel("Mean effective experts (decode)")
+    ax.set_title("Decode routing collapse under temperature scaling")
+    ax.legend(ncol=2)
+
+    title_suffix = f" ({suffix})" if suffix else ""
+    fig.suptitle(
+        f"α-sweep summary{title_suffix}",
+        fontsize=14,
+    )
+
+    fig.savefig(
+        out_dir / f"alpha_sweep_summary_{tag}.jpeg",
+        dpi=150,
+    )
+    plt.close(fig)
