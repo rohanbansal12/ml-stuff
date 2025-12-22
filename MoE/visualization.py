@@ -1,19 +1,25 @@
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer
-import matplotlib.pyplot as plt
-import seaborn as sns
+import argparse
+from pathlib import Path
+
+import numpy as np
 import torch
 from tqdm import tqdm
-from pathlib import Path
-import numpy as np
-import argparse
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer
 from peft import PeftModel
-import math
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Any
 
+from viz_utils import (
+    compute_metrics_from_counts,
+    plot_prefill_vs_decode_heatmaps,
+    plot_prefill_vs_decode_curves,
+    plot_eff_experts_across_prompts,
+    plot_ablation_dashboard,
+    top_expert_per_layer_from_counts,
+    ablate_experts,
+)
 
 MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MAX_NEW_TOKENS = 50
 
 PROMPTS = {
     "code": "Write a Python function for quicksort.",
@@ -23,114 +29,33 @@ PROMPTS = {
     "gibberish": "dsf jkl jkl",
 }
 
+
+MAX_NEW_TOKENS = 50
+N_EXPERTS = 60
+
 routing_data = {}
 
 
-def get_router_hook(layer_idx):
+def get_router_hook(layer_idx: int):
+    """Creates a forward hook to capture routing logits for a specific layer.
+
+    Args:
+        layer_idx: The index of the MoE layer to monitor.
+
+    Returns:
+        A hook function that can be registered with PyTorch's register_forward_hook.
+        The hook extracts routing logits and stores them in the global routing_data dict.
+    """
+
     def hook(module, inputs, output):
         if isinstance(output, tuple):
             data = output[0].detach().cpu()
         else:
             data = output.detach().cpu()
-
-        if layer_idx not in routing_data:
-            routing_data[layer_idx] = []
-        routing_data[layer_idx].append(data)
+        routing_data.setdefault(layer_idx, []).append(data)
+        return output
 
     return hook
-
-
-def _safe_entropy_from_dist(p: np.ndarray, eps: float = 1e-12) -> float:
-    """Entropy of a discrete distribution p (assumed nonnegative)."""
-    p = p.astype(np.float64)
-    s = p.sum()
-    if s <= 0:
-        return 0.0
-    p = p / s
-    p = np.clip(p, 0.0, 1.0)
-    m = p > 0
-    return float(-(p[m] * np.log(p[m] + eps)).sum())
-
-
-def compute_metrics_from_counts(
-    *,
-    counts_top1: np.ndarray,  # [L, E] int64
-    total_events: np.ndarray,  # [L] int64
-    sum_probs: Optional[np.ndarray] = None,  # [L, E] float64 (sum of probs)
-    sum_pmax: Optional[np.ndarray] = None,  # [L] float64 (sum over tokens of max prob)
-    sum_margin: Optional[np.ndarray] = None,  # [L] float64 (sum over tokens of (p1-p2))
-) -> Dict[str, Any]:
-    """
-    Pure computation: converts additive routing statistics into per-layer distributions and scalar metrics.
-    Does NOT write any plots.
-
-    Returns dict with:
-      - heatmap_load: [L,E] float64            (top-1 selection frequency per layer)
-      - heatmap_importance: [L,E] float64|None (mean softmax prob mass per layer)
-      - top1_share: [L] float64               (max load per layer)
-      - hhi: [L] float64                      (sum load^2 per layer)
-      - entropy_load: [L] float64             (entropy(load) per layer)
-      - eff_experts: [L] float64              (exp(entropy(load)) per layer)
-      - mean_pmax: [L] float64|None           (mean max prob per layer)
-      - mean_margin: [L] float64|None         (mean (p1-p2) per layer)
-    """
-    counts_top1 = np.asarray(counts_top1)
-    total_events = np.asarray(total_events)
-
-    L, E = counts_top1.shape
-    heatmap_load = np.zeros((L, E), dtype=np.float64)
-
-    top1_share = np.zeros(L, dtype=np.float64)
-    hhi = np.zeros(L, dtype=np.float64)
-    entropy_load = np.zeros(L, dtype=np.float64)
-    eff_experts = np.zeros(L, dtype=np.float64)
-
-    for l in range(L):
-        tot = float(total_events[l])
-        if tot <= 0:
-            continue
-        load = counts_top1[l].astype(np.float64) / tot
-        heatmap_load[l] = load
-        top1_share[l] = float(load.max())
-        hhi[l] = float((load * load).sum())
-        ent = _safe_entropy_from_dist(load)
-        entropy_load[l] = ent
-        eff_experts[l] = math.exp(ent)
-
-    heatmap_importance = None
-    if sum_probs is not None:
-        sum_probs = np.asarray(sum_probs, dtype=np.float64)
-        heatmap_importance = np.zeros((L, E), dtype=np.float64)
-        for l in range(L):
-            tot = float(total_events[l])
-            if tot <= 0:
-                continue
-            heatmap_importance[l] = sum_probs[l] / tot
-
-    mean_pmax = None
-    mean_margin = None
-    if sum_pmax is not None and sum_margin is not None:
-        sum_pmax = np.asarray(sum_pmax, dtype=np.float64)
-        sum_margin = np.asarray(sum_margin, dtype=np.float64)
-        mean_pmax = np.zeros(L, dtype=np.float64)
-        mean_margin = np.zeros(L, dtype=np.float64)
-        for l in range(L):
-            tot = float(total_events[l])
-            if tot <= 0:
-                continue
-            mean_pmax[l] = sum_pmax[l] / tot
-            mean_margin[l] = sum_margin[l] / tot
-
-    return {
-        "heatmap_load": heatmap_load,
-        "heatmap_importance": heatmap_importance,
-        "top1_share": top1_share,
-        "hhi": hhi,
-        "entropy_load": entropy_load,
-        "eff_experts": eff_experts,
-        "mean_pmax": mean_pmax,
-        "mean_margin": mean_margin,
-    }
 
 
 def summarize_routing_data(
@@ -139,16 +64,28 @@ def summarize_routing_data(
     num_layers: int,
     n_experts: int = 60,
     compute_importance: bool = True,
-) -> dict:
-    """
-    Convert routing_data into additive statistics suitable for subtraction.
+) -> Dict[str, Any]:
+    """Converts captured routing logits into additive statistics.
+
+    Processes the routing logits collected by forward hooks and computes aggregated
+    statistics that can be used for analysis or subtraction (e.g., decode = generate - prefill).
+
+    Args:
+        routing_data: Dictionary mapping layer indices to lists of routing logit tensors.
+            Each tensor has shape [T, E] where T is the number of tokens and E is the
+            number of experts.
+        num_layers: Total number of MoE layers in the model.
+        n_experts: Number of experts per layer. Defaults to 60.
+        compute_importance: Whether to compute importance metrics (softmax probabilities,
+            max probs, margins). Defaults to True.
 
     Returns:
-      - counts_top1: [L, E] int64  (top-1 selection counts)
-      - total_events: [L] int64    (total router decisions)
-      - sum_probs: [L, E] float64  (sum of softmax probs over tokens)  [optional]
-      - sum_pmax: [L] float64      (sum over tokens of max prob)
-      - sum_margin: [L] float64    (sum over tokens of (p1 - p2))
+        A dictionary containing:
+            - counts_top1: [L, E] int64 array of top-1 expert selection counts
+            - total_events: [L] int64 array of total routing decisions per layer
+            - sum_probs: [L, E] float64 array of sum of softmax probs (or None)
+            - sum_pmax: [L] float64 array of sum of max probabilities (or None)
+            - sum_margin: [L] float64 array of sum of (p1 - p2) margins (or None)
     """
     counts_top1 = np.zeros((num_layers, n_experts), dtype=np.int64)
     total_events = np.zeros(num_layers, dtype=np.int64)
@@ -201,158 +138,103 @@ def summarize_routing_data(
     }
 
 
-def plot_prefill_vs_decode_heatmaps(
-    *,
-    heatmap_prefill: np.ndarray,
-    heatmap_decode: np.ndarray,
-    out_dir: Path,
-    prompt_key: str,
-    suffix: str = "",
-    xtick_every: int = 5,
-    ytick_every: int = 2,
-    filename_prefix: str = "dashboard_heatmaps",
-):
-    """One figure: prefill load heatmap vs decode load heatmap."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+def run_prefill(model, inputs) -> None:
+    """Runs model prefill (prompt processing) and captures routing data.
 
-    vmax = float(max(heatmap_prefill.max(), heatmap_decode.max()))
-    vmin = 0.0
+    Clears the global routing_data dictionary and performs a forward pass on the model
+    to process the input prompt. Router hooks capture routing logits during this phase.
 
-    fig, axes = plt.subplots(1, 2, figsize=(22, 8), constrained_layout=True)
-
-    sns.heatmap(
-        heatmap_prefill,
-        ax=axes[0],
-        cmap="viridis",
-        vmin=vmin,
-        vmax=vmax,
-        xticklabels=xtick_every,
-        yticklabels=ytick_every,
-        cbar=False,
-    )
-    axes[0].set_title("Load (Prefill)")
-    axes[0].set_xlabel("Expert ID")
-    axes[0].set_ylabel("Layer Depth")
-
-    sns.heatmap(
-        heatmap_decode,
-        ax=axes[1],
-        cmap="viridis",
-        vmin=vmin,
-        vmax=vmax,
-        xticklabels=xtick_every,
-        yticklabels=ytick_every,
-        cbar=True,
-        cbar_kws={"label": "Top-1 Selection Frequency (Load)"},
-    )
-    axes[1].set_title("Load (Decode)")
-    axes[1].set_xlabel("Expert ID")
-    axes[1].set_ylabel("")
-
-    title_suffix = f" ({suffix})" if suffix else ""
-    fig.suptitle(f"Prefill vs Decode Routing: '{prompt_key}'{title_suffix}", fontsize=16)
-
-    fig.savefig(out_dir / f"{filename_prefix}_{prompt_key}.jpeg", dpi=150)
-    plt.close(fig)
-
-
-def plot_prefill_vs_decode_curves(
-    *,
-    pre: Dict[str, Any],
-    dec: Dict[str, Any],
-    out_dir: Path,
-    prompt_key: str,
-    suffix: str = "",
-    filename_prefix: str = "dashboard_curves",
-):
+    Args:
+        model: The language model to run inference on.
+        inputs: Tokenized input tensors (typically from tokenizer with return_tensors='pt').
     """
-    One figure with 2 rows:
-      Row1: effective experts (prefill vs decode)
-      Row2: router confidence (pmax + margin) if available
+    routing_data.clear()
+    with torch.no_grad():
+        _ = model(**inputs)
+
+
+def run_generate(model, inputs, max_new_tokens: int) -> None:
+    """Runs full model generation (prefill + decode) and captures routing data.
+
+    Clears the global routing_data dictionary and performs text generation including both
+    the prefill phase (prompt processing) and decode phase (token generation). Router hooks
+    capture routing logits during both phases.
+
+    Args:
+        model: The language model to run generation on.
+        inputs: Tokenized input tensors (typically from tokenizer with return_tensors='pt').
+        max_new_tokens: Maximum number of tokens to generate.
     """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    routing_data.clear()
+    with torch.no_grad():
+        _ = model.generate(**inputs, max_new_tokens=max_new_tokens)
 
-    eff_prefill = pre["eff_experts"]
-    eff_decode = dec["eff_experts"]
-    L = len(eff_prefill)
-    layers = np.arange(L)
 
-    fig, axes = plt.subplots(2, 1, figsize=(14, 9), sharex=True, constrained_layout=True)
+def decode_from_gen_minus_pre(
+    gen_sum: Dict[str, Any], pre_sum: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Extracts decode-only statistics by subtracting prefill from generation statistics.
 
-    # Row 1: diversity
-    axes[0].plot(layers, eff_prefill, label="prefill")
-    axes[0].plot(layers, eff_decode, label="decode")
-    axes[0].set_ylabel("Effective experts = exp(entropy(load))")
-    axes[0].set_title("Routing diversity")
-    axes[0].legend()
+    Computes the decode phase statistics by subtracting prefill routing statistics from
+    the full generation (prefill + decode) statistics. All values are clipped to ensure
+    non-negative results.
 
-    # Row 2: confidence (optional)
-    has_conf_pre = (pre.get("mean_pmax") is not None) and (pre.get("mean_margin") is not None)
-    has_conf_dec = (dec.get("mean_pmax") is not None) and (dec.get("mean_margin") is not None)
+    Args:
+        gen_sum: Dictionary of generation statistics from summarize_routing_data, containing
+            the routing statistics for the full generation process (prefill + decode).
+        pre_sum: Dictionary of prefill statistics from summarize_routing_data, containing
+            the routing statistics for only the prompt processing phase.
 
-    if has_conf_pre and has_conf_dec:
-        axes[1].plot(layers, pre["mean_pmax"], label="pmax prefill")
-        axes[1].plot(layers, dec["mean_pmax"], label="pmax decode")
-        axes[1].plot(layers, pre["mean_margin"], label="margin prefill")
-        axes[1].plot(layers, dec["mean_margin"], label="margin decode")
-        axes[1].set_ylabel("Value")
-        axes[1].set_title("Router confidence")
-        axes[1].legend(ncol=2)
-    else:
-        axes[1].text(
-            0.02, 0.5,
-            "Confidence curves unavailable (missing sum_pmax/sum_margin).",
-            transform=axes[1].transAxes,
-            va="center",
+    Returns:
+        A dictionary containing decode-only statistics with the same structure as the input:
+            - counts_top1: [L, E] int64 array of decode-only expert selection counts
+            - total_events: [L] int64 array of decode-only routing decisions
+            - sum_probs: [L, E] float64 array of decode-only softmax probs (or None)
+            - sum_pmax: [L] float64 array of decode-only max probabilities (or None)
+            - sum_margin: [L] float64 array of decode-only margins (or None)
+    """
+    decode_counts = np.clip(gen_sum["counts_top1"] - pre_sum["counts_top1"], 0, None)
+    decode_total = np.clip(gen_sum["total_events"] - pre_sum["total_events"], 0, None)
+
+    decode_sum_probs = None
+    decode_sum_pmax = None
+    decode_sum_margin = None
+    if gen_sum["sum_probs"] is not None and pre_sum["sum_probs"] is not None:
+        decode_sum_probs = np.clip(
+            gen_sum["sum_probs"] - pre_sum["sum_probs"], 0.0, None
         )
-        axes[1].set_axis_off()
+    if gen_sum["sum_pmax"] is not None and pre_sum["sum_pmax"] is not None:
+        decode_sum_pmax = np.clip(gen_sum["sum_pmax"] - pre_sum["sum_pmax"], 0.0, None)
+    if gen_sum["sum_margin"] is not None and pre_sum["sum_margin"] is not None:
+        decode_sum_margin = np.clip(
+            gen_sum["sum_margin"] - pre_sum["sum_margin"], 0.0, None
+        )
 
-    axes[1].set_xlabel("Layer depth")
-
-    title_suffix = f" ({suffix})" if suffix else ""
-    fig.suptitle(f"Prefill vs Decode Curves: '{prompt_key}'{title_suffix}", fontsize=16)
-
-    fig.savefig(out_dir / f"{filename_prefix}_{prompt_key}.jpeg", dpi=150)
-    plt.close(fig)
-
-
-def plot_eff_experts_across_prompts(
-    results: Dict[str, Dict[str, np.ndarray]],
-    *,
-    out_dir: Path,
-    suffix: str = "",
-    tag: str = "prefill",  # "prefill" or "decode"
-    filename_prefix: str = "compare_effective_experts",
-):
-    """One plot comparing effective-experts curves across prompts."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(1, 1, figsize=(14, 6), constrained_layout=True)
-
-    for key, r in results.items():
-        y = r["eff_prefill"] if tag == "prefill" else r["eff_decode"]
-        ax.plot(np.arange(len(y)), y, label=key)
-
-    ax.set_xlabel("Layer depth")
-    ax.set_ylabel("Effective experts")
-    ax.set_title(f"Effective experts across prompts ({tag})" + (f" ({suffix})" if suffix else ""))
-    ax.legend(ncol=3)
-
-    fig.savefig(out_dir / f"{filename_prefix}_{tag}.jpeg", dpi=150)
-    plt.close(fig)
+    return {
+        "counts_top1": decode_counts,
+        "total_events": decode_total,
+        "sum_probs": decode_sum_probs,
+        "sum_pmax": decode_sum_pmax,
+        "sum_margin": decode_sum_margin,
+    }
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--adapter_path", type=str, default=None)
     parser.add_argument(
         "--out_dir", type=str, default="/workspace/ml-stuff/MoE/plots/baseline"
     )
     parser.add_argument("--max_new_tokens", type=int, default=MAX_NEW_TOKENS)
-    parser.add_argument("--n_experts", type=int, default=60)
+    parser.add_argument("--n_experts", type=int, default=N_EXPERTS)
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="base",
+        choices=["base", "ablate-prefill", "ablate-decode"],
+        help="base: dashboards; ablate-prefill: ablate top expert per layer in prefill; "
+        "ablate-decode: ablate top expert per layer in decode (derived from baseline decode).",
+    )
     args = parser.parse_args()
 
     device = torch.device(DEVICE)
@@ -361,12 +243,11 @@ if __name__ == "__main__":
         load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16
     )
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        quantization_config=quantization_config,
+        MODEL_NAME, quantization_config=quantization_config
     ).to(device)
+
     layer_att = model
     suffix = ""
-
     if args.adapter_path is not None:
         model = PeftModel.from_pretrained(model, args.adapter_path)
         layer_att = model.base_model.model
@@ -375,32 +256,26 @@ if __name__ == "__main__":
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 
-    out_dir = (
-        args.out_dir
-        if args.out_dir is not None
-        else "/workspace/ml-stuff/MoE/plots/baseline"
-    )
-    out_dir = Path(out_dir)
-    out_dir.mkdir(exist_ok=True, parents=True)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # attach input hooks to the model
+    # Attach router observation hooks (same for all modes)
     num_layers = len(layer_att.model.layers)
+
     for i, layer in enumerate(layer_att.model.layers):
         if hasattr(layer.mlp, "gate"):
             layer.mlp.gate.register_forward_hook(get_router_hook(i))
 
+    # Store for global comparisons (base mode)
     results = {}
 
-    for key, prompt in tqdm(PROMPTS.items(), desc="enumerating prompts"):
+    for key, prompt in tqdm(PROMPTS.items(), desc=f"mode={args.mode} prompts"):
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
         # -----------------------
-        # Prefill stats
+        # Baseline prefill + generate
         # -----------------------
-        routing_data.clear()
-        with torch.no_grad():
-            _ = model(**inputs)
-
+        run_prefill(model, inputs)
         pre_sum = summarize_routing_data(
             routing_data,
             num_layers=num_layers,
@@ -408,13 +283,7 @@ if __name__ == "__main__":
             compute_importance=True,
         )
 
-        # -----------------------
-        # Full generate stats
-        # -----------------------
-        routing_data.clear()
-        with torch.no_grad():
-            _ = model.generate(**inputs, max_new_tokens=args.max_new_tokens)
-
+        run_generate(model, inputs, max_new_tokens=args.max_new_tokens)
         gen_sum = summarize_routing_data(
             routing_data,
             num_layers=num_layers,
@@ -422,36 +291,8 @@ if __name__ == "__main__":
             compute_importance=True,
         )
 
-        # -----------------------
-        # Decode-only = generate - prefill
-        # -----------------------
-        decode_counts = np.clip(
-            gen_sum["counts_top1"] - pre_sum["counts_top1"], 0, None
-        )
-        decode_total = np.clip(
-            gen_sum["total_events"] - pre_sum["total_events"], 0, None
-        )
+        dec_sum = decode_from_gen_minus_pre(gen_sum, pre_sum)
 
-        decode_sum_probs = None
-        decode_sum_pmax = None
-        decode_sum_margin = None
-
-        if gen_sum["sum_probs"] is not None and pre_sum["sum_probs"] is not None:
-            decode_sum_probs = np.clip(
-                gen_sum["sum_probs"] - pre_sum["sum_probs"], 0.0, None
-            )
-        if gen_sum["sum_pmax"] is not None and pre_sum["sum_pmax"] is not None:
-            decode_sum_pmax = np.clip(
-                gen_sum["sum_pmax"] - pre_sum["sum_pmax"], 0.0, None
-            )
-        if gen_sum["sum_margin"] is not None and pre_sum["sum_margin"] is not None:
-            decode_sum_margin = np.clip(
-                gen_sum["sum_margin"] - pre_sum["sum_margin"], 0.0, None
-            )
-
-        # -----------------------
-        # Compute metrics (no plotting here)
-        # -----------------------
         pre_metrics = compute_metrics_from_counts(
             counts_top1=pre_sum["counts_top1"],
             total_events=pre_sum["total_events"],
@@ -459,54 +300,126 @@ if __name__ == "__main__":
             sum_pmax=pre_sum["sum_pmax"],
             sum_margin=pre_sum["sum_margin"],
         )
-
         dec_metrics = compute_metrics_from_counts(
-            counts_top1=decode_counts,
-            total_events=decode_total,
-            sum_probs=decode_sum_probs,
-            sum_pmax=decode_sum_pmax,
-            sum_margin=decode_sum_margin,
+            counts_top1=dec_sum["counts_top1"],
+            total_events=dec_sum["total_events"],
+            sum_probs=dec_sum["sum_probs"],
+            sum_pmax=dec_sum["sum_pmax"],
+            sum_margin=dec_sum["sum_margin"],
         )
+
+        if args.mode == "base":
+            plot_prefill_vs_decode_heatmaps(
+                heatmap_prefill=pre_metrics["heatmap_load"],
+                heatmap_decode=dec_metrics["heatmap_load"],
+                out_dir=out_dir,
+                prompt_key=key,
+                suffix=suffix,
+            )
+            plot_prefill_vs_decode_curves(
+                pre=pre_metrics,
+                dec=dec_metrics,
+                out_dir=out_dir,
+                prompt_key=key,
+                suffix=suffix,
+            )
+            results[key] = {
+                "eff_prefill": pre_metrics["eff_experts"],
+                "eff_decode": dec_metrics["eff_experts"],
+            }
+            continue
 
         # -----------------------
-        # Dashboards (2 plots per prompt)
+        # Ablation modes
         # -----------------------
-        plot_prefill_vs_decode_heatmaps(
-            heatmap_prefill=pre_metrics["heatmap_load"],
-            heatmap_decode=dec_metrics["heatmap_load"],
-            out_dir=out_dir,
-            prompt_key=key,
-            suffix=suffix,
+        if args.mode == "ablate-prefill":
+            mask_by_layer = top_expert_per_layer_from_counts(pre_sum["counts_top1"])
+
+            routing_data.clear()
+            with ablate_experts(layer_att, mask_by_layer):
+                with torch.no_grad():
+                    _ = model(**inputs)
+
+            pre_abl_sum = summarize_routing_data(
+                routing_data,
+                num_layers=num_layers,
+                n_experts=args.n_experts,
+                compute_importance=False,
+            )
+            pre_abl_metrics = compute_metrics_from_counts(
+                counts_top1=pre_abl_sum["counts_top1"],
+                total_events=pre_abl_sum["total_events"],
+            )
+
+            title_suffix = f" ({suffix})" if suffix else ""
+            plot_ablation_dashboard(
+                heatmap_base=pre_metrics["heatmap_load"],
+                heatmap_ablated=pre_abl_metrics["heatmap_load"],
+                out_dir=out_dir,
+                title=f"Expert ablation (prefill): '{key}'{title_suffix}\nMasked: top expert per layer",
+                filename=f"ablation_prefill_{key}.jpeg",
+            )
+            continue
+
+        if args.mode == "ablate-decode":
+            # pick top expert per layer from BASELINE decode
+            mask_by_layer = top_expert_per_layer_from_counts(dec_sum["counts_top1"])
+
+            # Run full generate with ablation enabled, then subtract prefill (also under ablation)
+            # so decode-only stays consistent.
+
+            # ablated prefill
+            routing_data.clear()
+            with ablate_experts(layer_att, mask_by_layer):
+                with torch.no_grad():
+                    _ = model(**inputs)
+            pre_abl = summarize_routing_data(
+                routing_data,
+                num_layers=num_layers,
+                n_experts=args.n_experts,
+                compute_importance=True,
+            )
+
+            # ablated generate
+            routing_data.clear()
+            with ablate_experts(layer_att, mask_by_layer):
+                with torch.no_grad():
+                    _ = model.generate(**inputs, max_new_tokens=args.max_new_tokens)
+            gen_abl = summarize_routing_data(
+                routing_data,
+                num_layers=num_layers,
+                n_experts=args.n_experts,
+                compute_importance=True,
+            )
+
+            dec_abl = decode_from_gen_minus_pre(gen_abl, pre_abl)
+
+            dec_abl_metrics = compute_metrics_from_counts(
+                counts_top1=dec_abl["counts_top1"],
+                total_events=dec_abl["total_events"],
+                sum_probs=dec_abl["sum_probs"],
+                sum_pmax=dec_abl["sum_pmax"],
+                sum_margin=dec_abl["sum_margin"],
+            )
+
+            title_suffix = f" ({suffix})" if suffix else ""
+            plot_ablation_dashboard(
+                heatmap_base=dec_metrics["heatmap_load"],
+                heatmap_ablated=dec_abl_metrics["heatmap_load"],
+                out_dir=out_dir,
+                title=f"Expert ablation (decode): '{key}'{title_suffix}\nMasked: top decode expert per layer (from baseline)",
+                filename=f"ablation_decode_{key}.jpeg",
+            )
+            continue
+
+    if args.mode == "base" and results:
+        plot_eff_experts_across_prompts(
+            results, out_dir=out_dir, suffix=suffix, tag="prefill"
+        )
+        plot_eff_experts_across_prompts(
+            results, out_dir=out_dir, suffix=suffix, tag="decode"
         )
 
-        plot_prefill_vs_decode_curves(
-            pre=pre_metrics,
-            dec=dec_metrics,
-            out_dir=out_dir,
-            prompt_key=key,
-            suffix=suffix,
-        )
 
-        # global comparison storage
-        results[key] = {
-            "eff_prefill": pre_metrics["eff_experts"],
-            "eff_decode": dec_metrics["eff_experts"],
-        }
-
-        # Optional sanity print
-        print(
-            f"[{key}] totals per layer (min/max) "
-            f"prefill={pre_sum['total_events'].min()}/{pre_sum['total_events'].max()} "
-            f"generate={gen_sum['total_events'].min()}/{gen_sum['total_events'].max()} "
-            f"decode={decode_total.min()}/{decode_total.max()}"
-        )
-
-    # -----------------------
-    # Optional: 2 global comparison plots across prompts
-    # -----------------------
-    plot_eff_experts_across_prompts(
-        results, out_dir=out_dir, suffix=suffix, tag="prefill"
-    )
-    plot_eff_experts_across_prompts(
-        results, out_dir=out_dir, suffix=suffix, tag="decode"
-    )
+if __name__ == "__main__":
+    main()
