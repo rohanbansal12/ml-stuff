@@ -1961,7 +1961,7 @@ def save_position_analysis_plots(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out_dir", type=str, default="/workspace/ml-stuff/MoE/out")
+    parser.add_argument("--out_dir", type=str, default="/workspace/ml-stuff/MoE/out/baseline")
     parser.add_argument("--samples", type=int, default=50)
     parser.add_argument("--num_experts", type=int, default=60)
     args = parser.parse_args()
