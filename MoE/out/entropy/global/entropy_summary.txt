@@ -1,0 +1,27 @@
+=== Router Entropy Analysis ===
+
+Total tokens analyzed: 170,428
+Number of layers: 24
+
+Global Statistics:
+  Mean entropy:   0.8582
+  Std entropy:    0.0972
+  Median entropy: 0.8814
+
+Percentiles:
+  p5: 0.6661
+  p25: 0.8199
+  p50: 0.8814
+  p75: 0.9260
+  p95: 0.9629
+
+Layer Statistics:
+  Lowest mean entropy:  Layer 18 (0.8019)
+  Highest mean entropy: Layer 1 (0.9427)
+  Mean entropy range:   [0.8019, 0.9427]
+
+High Entropy Token Examples (router uncertain):
+  ['9', '9', '7', '9', '9', '9', '1', '4', '6', '4', '4', '0', '1', '1', '4', '2', '9', '9', '1', '4']
+
+Low Entropy Token Examples (router confident):
+  [' Dunn', 'bk', ' ()', 'ul', ' city', '3', ' –', 'born', ' by', ' by', 'in', ' by', ' by', ' by', ' Van', ' como', ' are', 'f', 'ux', ' that']

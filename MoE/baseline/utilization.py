@@ -3,12 +3,16 @@ from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 from typing import Dict, List, Callable, Optional
 import argparse
 from pathlib import Path
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import pandas as pd
-from data import load_multi_source_data
+from tqdm import tqdm
+import sys
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from MoE.baseline.data import DEFAULT_SOURCES, load_multi_source_data
+from scipy import stats as scipy_stats
 
 MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -898,43 +902,1061 @@ def analyze_routing_weights_by_category(
 
 
 def analyze_entropy(
-    probs: torch.Tensor, seq_lengths: torch.Tensor, num_experts: int, k: int = 10
+    probs: torch.Tensor,
+    seq_lengths: torch.Tensor,
+    num_experts: int,
+    k: int = 10,
 ) -> dict:
+    """
+    Analyze router entropy patterns.
+
+    Args:
+        probs: (num_layers, total_tokens, num_experts) - routing probabilities
+        seq_lengths: (num_sequences,) - length of each sequence
+        num_experts: number of experts
+        k: number of top/bottom tokens to identify
+
+    Returns:
+        Dictionary with entropy statistics and extreme token locations
+    """
+    num_layers, total_tokens, _ = probs.shape
+
     output_dict = {}
 
+    # Compute entropy
     max_entropy = np.log(num_experts)
-
-    token_entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1)
+    token_entropy = -torch.xlogy(probs, probs).sum(dim=-1)  # (num_layers, total_tokens)
     norm_entropy = token_entropy / max_entropy
+
     output_dict["token_entropy"] = token_entropy
     output_dict["norm_entropy"] = norm_entropy
 
-    # get tokens with highest entropy
-    top_values, top_indices = torch.topk(norm_entropy, k)
+    # Per-layer statistics
+    output_dict["layer_entropy_mean"] = norm_entropy.mean(dim=1)  # (num_layers,)
+    output_dict["layer_entropy_std"] = norm_entropy.std(dim=1)
+
+    # For finding extreme tokens, average entropy across layers first
+    # (or you could analyze per-layer, but global is simpler)
+    mean_entropy_per_token = norm_entropy.mean(dim=0)  # (total_tokens,)
+
+    # Build sequence mapping
     cum_lengths = torch.cumsum(seq_lengths, dim=0)
-    seq_indices = torch.searchsorted(cum_lengths, top_indices, right=True)
     seq_starts = torch.cat(
         [torch.tensor([0], device=seq_lengths.device), cum_lengths[:-1]]
     )
-    offsets = top_indices - seq_starts[seq_indices]
-    output_dict["top_entropy_tokens"] = {"seq_idx": seq_indices, "offsets": offsets}
 
-    # get tokens with highest entropy
-    top_values, top_indices = torch.topk(norm_entropy, k, largest=False)
-    cum_lengths = torch.cumsum(seq_lengths, dim=0)
-    seq_indices = torch.searchsorted(cum_lengths, top_indices, right=True)
-    seq_starts = torch.cat(
-        [torch.tensor([0], device=seq_lengths.device), cum_lengths[:-1]]
-    )
-    offsets = top_indices - seq_starts[seq_indices]
-    output_dict["bottom_entropy_tokens"] = {"seq_idx": seq_indices, "offsets": offsets}
+    def get_token_locations(indices: torch.Tensor) -> dict:
+        """Map flat token indices to (sequence_idx, position_in_sequence)."""
+        seq_indices = torch.searchsorted(cum_lengths, indices, right=True)
+        # Clamp to valid range
+        seq_indices = torch.clamp(seq_indices, 0, len(seq_lengths) - 1)
+        offsets = indices - seq_starts[seq_indices]
+        return {"seq_idx": seq_indices, "offset": offsets}
 
-    layer_entropy_mean = torch.mean(norm_entropy, dim=-1)
-    layer_entropy_std = torch.std(norm_entropy, dim=-1)
-    output_dict["layer_entropy_mean"] = layer_entropy_mean
-    output_dict["layer_entropy_std"] = layer_entropy_std
+    # Highest entropy tokens (router most uncertain)
+    top_values, top_indices = torch.topk(mean_entropy_per_token, k, largest=True)
+    output_dict["high_entropy_tokens"] = {
+        **get_token_locations(top_indices),
+        "entropy_values": top_values,
+        "token_indices": top_indices,
+    }
+
+    # Lowest entropy tokens (router most confident)
+    bottom_values, bottom_indices = torch.topk(mean_entropy_per_token, k, largest=False)
+    output_dict["low_entropy_tokens"] = {
+        **get_token_locations(bottom_indices),
+        "entropy_values": bottom_values,
+        "token_indices": bottom_indices,
+    }
+
+    # Additional: entropy distribution statistics
+    output_dict["global_entropy_mean"] = norm_entropy.mean().item()
+    output_dict["global_entropy_std"] = norm_entropy.std().item()
+    output_dict["global_entropy_median"] = norm_entropy.median().item()
+
+    # Percentiles for understanding distribution shape
+    flat_entropy = norm_entropy.flatten()
+    output_dict["entropy_percentiles"] = {
+        "p5": torch.quantile(flat_entropy, 0.05).item(),
+        "p25": torch.quantile(flat_entropy, 0.25).item(),
+        "p50": torch.quantile(flat_entropy, 0.50).item(),
+        "p75": torch.quantile(flat_entropy, 0.75).item(),
+        "p95": torch.quantile(flat_entropy, 0.95).item(),
+    }
 
     return output_dict
+
+
+def save_entropy_analysis_plots(
+    entropy_stats: dict,
+    dataset,
+    tokenizer,
+    out_dir: str | Path,
+    category: Optional[str] = None,
+    num_extreme_tokens: int = 50,
+):
+    """
+    Generate plots and reports for router entropy analysis (Stage 2.4).
+
+    Args:
+        entropy_stats: Output from analyze_entropy()
+        dataset: Dataset object with __getitem__ returning {"input_ids": tensor}
+        tokenizer: Tokenizer for decoding tokens
+        out_dir: Output directory
+        category: Optional category name for titles
+        num_extreme_tokens: Number of high/low entropy tokens to decode
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    title_suffix = f" ({category})" if category else ""
+
+    # Extract data
+    norm_entropy = entropy_stats["norm_entropy"].numpy()  # (num_layers, total_tokens)
+    layer_mean = entropy_stats["layer_entropy_mean"].numpy()
+    layer_std = entropy_stats["layer_entropy_std"].numpy()
+
+    num_layers, total_tokens = norm_entropy.shape
+
+    # ============================
+    # 1) ENTROPY BY LAYER (mean + std)
+    # ============================
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    layers = np.arange(num_layers)
+    ax.errorbar(
+        layers,
+        layer_mean,
+        yerr=layer_std,
+        fmt="o-",
+        capsize=3,
+        color="purple",
+        alpha=0.8,
+        label="Mean ± Std",
+    )
+    ax.fill_between(
+        layers,
+        layer_mean - layer_std,
+        layer_mean + layer_std,
+        alpha=0.2,
+        color="purple",
+    )
+
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Normalized Entropy")
+    ax.set_ylim(0, 1)
+    ax.set_title(f"Router Entropy by Layer{title_suffix}")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / "entropy_by_layer.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 2) ENTROPY DISTRIBUTION HISTOGRAMS (sampled layers)
+    # ============================
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    axes = axes.flatten()
+
+    sample_layers = np.linspace(0, num_layers - 1, 6, dtype=int)
+
+    for ax, layer_idx in zip(axes, sample_layers):
+        layer_entropy = norm_entropy[layer_idx]
+        layer_entropy = layer_entropy[np.isfinite(layer_entropy)]
+
+        if len(layer_entropy) == 0:
+            ax.text(
+                0.5,
+                0.5,
+                "No valid data",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            ax.set_title(f"Layer {layer_idx}")
+            continue
+
+        ax.hist(
+            layer_entropy,
+            bins=50,
+            density=True,
+            alpha=0.7,
+            color="purple",
+            edgecolor="white",
+            linewidth=0.5,
+        )
+        ax.axvline(
+            layer_entropy.mean(),
+            color="red",
+            linestyle="--",
+            label=f"Mean={layer_entropy.mean():.3f}",
+        )
+        ax.axvline(
+            np.median(layer_entropy),
+            color="orange",
+            linestyle=":",
+            label=f"Median={np.median(layer_entropy):.3f}",
+        )
+        ax.set_xlabel("Normalized Entropy")
+        ax.set_ylabel("Density")
+        ax.set_title(f"Layer {layer_idx}")
+        ax.set_xlim(0, 1)
+        ax.legend(fontsize=8)
+
+    plt.suptitle(f"Router Entropy Distribution{title_suffix}")
+    plt.tight_layout()
+    plt.savefig(out_dir / "entropy_histograms.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 3) GLOBAL ENTROPY DISTRIBUTION
+    # ============================
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    flat_entropy = norm_entropy.flatten()
+    flat_entropy = flat_entropy[np.isfinite(flat_entropy)]
+
+    ax.hist(
+        flat_entropy,
+        bins=100,
+        density=True,
+        alpha=0.7,
+        color="purple",
+        edgecolor="white",
+        linewidth=0.5,
+    )
+
+    # Add percentile markers
+    percentiles = entropy_stats.get("entropy_percentiles", {})
+    if percentiles:
+        colors = ["red", "orange", "green", "orange", "red"]
+        labels = ["5th", "25th", "50th", "75th", "95th"]
+        for (pname, pval), color, label in zip(percentiles.items(), colors, labels):
+            ax.axvline(
+                pval,
+                color=color,
+                linestyle="--",
+                alpha=0.7,
+                label=f"{label}={pval:.3f}",
+            )
+
+    ax.set_xlabel("Normalized Entropy")
+    ax.set_ylabel("Density")
+    ax.set_title(f"Global Router Entropy Distribution{title_suffix}")
+    ax.set_xlim(0, 1)
+    ax.legend(loc="upper right", fontsize=8)
+    plt.tight_layout()
+    plt.savefig(out_dir / "entropy_global_distribution.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 4) ENTROPY HEATMAP BY LAYER
+    # ============================
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    bins = np.linspace(0, 1, 26)
+    hist_matrix = np.zeros((num_layers, len(bins) - 1))
+
+    for layer_idx in range(num_layers):
+        layer_data = norm_entropy[layer_idx]
+        layer_data = layer_data[np.isfinite(layer_data)]
+        if len(layer_data) > 0:
+            hist, _ = np.histogram(layer_data, bins=bins, density=True)
+            hist_matrix[layer_idx] = hist
+
+    sns.heatmap(
+        hist_matrix.T,
+        cmap="viridis",
+        ax=ax,
+        cbar_kws={"label": "Density"},
+        xticklabels=5,
+        yticklabels=[f"{bins[i]:.2f}" for i in range(0, len(bins) - 1, 5)],
+    )
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Normalized Entropy")
+    ax.set_title(f"Entropy Distribution by Layer{title_suffix}")
+    ax.invert_yaxis()
+    plt.tight_layout()
+    plt.savefig(out_dir / "entropy_heatmap.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 5) ENTROPY CATEGORIES BY LAYER (stacked area)
+    # ============================
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    thresholds = [
+        (0.0, 0.3, "Low (0.0-0.3)", "confident"),
+        (0.3, 0.5, "Medium-Low (0.3-0.5)", "moderate"),
+        (0.5, 0.7, "Medium-High (0.5-0.7)", "uncertain"),
+        (0.7, 1.0, "High (0.7-1.0)", "very uncertain"),
+    ]
+
+    category_counts = np.zeros((num_layers, len(thresholds)))
+
+    for layer_idx in range(num_layers):
+        layer_ent = norm_entropy[layer_idx]
+        for i, (low, high, _, _) in enumerate(thresholds):
+            category_counts[layer_idx, i] = (
+                (layer_ent >= low) & (layer_ent < high)
+            ).sum()
+
+    category_pcts = category_counts / category_counts.sum(axis=1, keepdims=True) * 100
+
+    colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, len(thresholds)))
+
+    bottom = np.zeros(num_layers)
+    for i, (_, _, label, _) in enumerate(thresholds):
+        ax.fill_between(
+            np.arange(num_layers),
+            bottom,
+            bottom + category_pcts[:, i],
+            label=label,
+            color=colors[i],
+            alpha=0.8,
+        )
+        bottom += category_pcts[:, i]
+
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Percentage of Tokens")
+    ax.set_title(f"Router Confidence Categories by Layer{title_suffix}")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.set_xlim(0, num_layers - 1)
+    ax.set_ylim(0, 100)
+    plt.tight_layout()
+    plt.savefig(out_dir / "entropy_categories_by_layer.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 6) LAYER CORRELATION MATRIX
+    # ============================
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    # Subsample tokens if too many
+    if total_tokens > 10000:
+        sample_idx = np.random.choice(total_tokens, 10000, replace=False)
+        entropy_sample = norm_entropy[:, sample_idx]
+    else:
+        entropy_sample = norm_entropy
+
+    # Correlation between layers
+    corr_matrix = np.corrcoef(entropy_sample)
+
+    mask = np.triu(np.ones_like(corr_matrix, dtype=bool), k=1)
+    sns.heatmap(
+        corr_matrix,
+        mask=mask,
+        cmap="coolwarm",
+        center=0,
+        vmin=-1,
+        vmax=1,
+        annot=False,
+        ax=ax,
+        cbar_kws={"label": "Correlation"},
+    )
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Layer")
+    ax.set_title(f"Entropy Correlation Between Layers{title_suffix}")
+    plt.tight_layout()
+    plt.savefig(out_dir / "entropy_layer_correlation.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 7) DECODE AND SAVE EXTREME TOKENS
+    # ============================
+    extreme_tokens_data = []
+
+    for entropy_type, key, desc in [
+        ("high", "high_entropy_tokens", "Router Uncertain"),
+        ("low", "low_entropy_tokens", "Router Confident"),
+    ]:
+        if key not in entropy_stats:
+            continue
+
+        token_info = entropy_stats[key]
+        n_tokens = min(num_extreme_tokens, len(token_info["seq_idx"]))
+
+        for i in range(n_tokens):
+            seq_idx = token_info["seq_idx"][i].item()
+            offset = token_info["offset"][i].item()
+            entropy_val = token_info["entropy_values"][i].item()
+
+            try:
+                input_ids = dataset[seq_idx]["input_ids"]
+
+                # Handle tensor vs list
+                if isinstance(input_ids, torch.Tensor):
+                    input_ids = input_ids.squeeze()
+                    if offset >= len(input_ids):
+                        continue
+                    token_id = input_ids[offset].item()
+
+                    # Context window
+                    ctx_start = max(0, offset - 5)
+                    ctx_end = min(len(input_ids), offset + 6)
+                    context_ids = input_ids[ctx_start:ctx_end].tolist()
+                else:
+                    if offset >= len(input_ids):
+                        continue
+                    token_id = input_ids[offset]
+                    ctx_start = max(0, offset - 5)
+                    ctx_end = min(len(input_ids), offset + 6)
+                    context_ids = input_ids[ctx_start:ctx_end]
+
+                token_str = tokenizer.decode([token_id])
+                context_str = tokenizer.decode(context_ids)
+
+                # Mark the target token in context
+                pre_context = tokenizer.decode(context_ids[: offset - ctx_start])
+                post_context = tokenizer.decode(context_ids[offset - ctx_start + 1 :])
+                marked_context = f"{pre_context}>>>{token_str}<<<{post_context}"
+
+                extreme_tokens_data.append(
+                    {
+                        "type": entropy_type,
+                        "rank": i + 1,
+                        "entropy": entropy_val,
+                        "token": token_str,
+                        "token_id": token_id,
+                        "seq_idx": seq_idx,
+                        "position": offset,
+                        "context": context_str,
+                        "marked_context": marked_context,
+                    }
+                )
+
+            except Exception as e:
+                print(f"Error decoding token {i} ({entropy_type}): {e}")
+                continue
+
+    # Save to CSV
+    if extreme_tokens_data:
+        df = pd.DataFrame(extreme_tokens_data)
+        df.to_csv(out_dir / "extreme_entropy_tokens.csv", index=False)
+
+        # Also save readable text report
+        with open(out_dir / "extreme_entropy_tokens.txt", "w") as f:
+            f.write(f"=== Extreme Entropy Tokens{title_suffix} ===\n\n")
+
+            f.write("=" * 60 + "\n")
+            f.write("HIGH ENTROPY TOKENS (Router Uncertain)\n")
+            f.write("=" * 60 + "\n\n")
+
+            high_df = df[df["type"] == "high"].head(30)
+            for _, row in high_df.iterrows():
+                f.write(f"[{row['rank']}] Entropy: {row['entropy']:.4f}\n")
+                f.write(f"    Token: '{row['token']}' (id={row['token_id']})\n")
+                f.write(f"    Position: seq={row['seq_idx']}, pos={row['position']}\n")
+                f.write(f"    Context: {row['marked_context']}\n\n")
+
+            f.write("\n" + "=" * 60 + "\n")
+            f.write("LOW ENTROPY TOKENS (Router Confident)\n")
+            f.write("=" * 60 + "\n\n")
+
+            low_df = df[df["type"] == "low"].head(30)
+            for _, row in low_df.iterrows():
+                f.write(f"[{row['rank']}] Entropy: {row['entropy']:.4f}\n")
+                f.write(f"    Token: '{row['token']}' (id={row['token_id']})\n")
+                f.write(f"    Position: seq={row['seq_idx']}, pos={row['position']}\n")
+                f.write(f"    Context: {row['marked_context']}\n\n")
+
+    # ============================
+    # 8) SUMMARY STATISTICS
+    # ============================
+    summary_df = pd.DataFrame(
+        {
+            "layer": np.arange(num_layers),
+            "entropy_mean": layer_mean,
+            "entropy_std": layer_std,
+            "entropy_median": np.median(norm_entropy, axis=1),
+            "entropy_min": np.nanmin(norm_entropy, axis=1),
+            "entropy_max": np.nanmax(norm_entropy, axis=1),
+        }
+    )
+    summary_df.to_csv(out_dir / "entropy_layer_summary.csv", index=False)
+
+    # Text summary
+    with open(out_dir / "entropy_summary.txt", "w") as f:
+        f.write(f"=== Router Entropy Analysis{title_suffix} ===\n\n")
+        f.write(f"Total tokens analyzed: {total_tokens:,}\n")
+        f.write(f"Number of layers: {num_layers}\n\n")
+
+        f.write("Global Statistics:\n")
+        f.write(
+            f"  Mean entropy:   {entropy_stats.get('global_entropy_mean', np.nanmean(norm_entropy)):.4f}\n"
+        )
+        f.write(
+            f"  Std entropy:    {entropy_stats.get('global_entropy_std', np.nanstd(norm_entropy)):.4f}\n"
+        )
+        f.write(
+            f"  Median entropy: {entropy_stats.get('global_entropy_median', np.nanmedian(norm_entropy)):.4f}\n\n"
+        )
+
+        if "entropy_percentiles" in entropy_stats:
+            f.write("Percentiles:\n")
+            for pname, pval in entropy_stats["entropy_percentiles"].items():
+                f.write(f"  {pname}: {pval:.4f}\n")
+            f.write("\n")
+
+        f.write("Layer Statistics:\n")
+        f.write(
+            f"  Lowest mean entropy:  Layer {np.argmin(layer_mean)} ({layer_mean.min():.4f})\n"
+        )
+        f.write(
+            f"  Highest mean entropy: Layer {np.argmax(layer_mean)} ({layer_mean.max():.4f})\n"
+        )
+        f.write(
+            f"  Mean entropy range:   [{layer_mean.min():.4f}, {layer_mean.max():.4f}]\n\n"
+        )
+
+        # Token type analysis if we decoded tokens
+        if extreme_tokens_data:
+            high_tokens = [
+                d["token"] for d in extreme_tokens_data if d["type"] == "high"
+            ]
+            low_tokens = [d["token"] for d in extreme_tokens_data if d["type"] == "low"]
+
+            f.write("High Entropy Token Examples (router uncertain):\n")
+            f.write(f"  {high_tokens[:20]}\n\n")
+
+            f.write("Low Entropy Token Examples (router confident):\n")
+            f.write(f"  {low_tokens[:20]}\n")
+
+    print(f"Saved entropy analysis to {out_dir}")
+
+
+def compare_entropy_across_categories(
+    category_entropy_stats: dict,
+    out_dir: str | Path,
+):
+    """
+    Compare entropy patterns across different data categories.
+
+    Args:
+        category_entropy_stats: Dict mapping category name to entropy_stats dict
+        out_dir: Output directory
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    categories = list(category_entropy_stats.keys())
+    num_layers = category_entropy_stats[categories[0]]["layer_entropy_mean"].shape[0]
+
+    # ============================
+    # 1) MEAN ENTROPY BY CATEGORY
+    # ============================
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    for cat in categories:
+        mean = category_entropy_stats[cat]["layer_entropy_mean"].numpy()
+        ax.plot(np.arange(num_layers), mean, "o-", label=cat, alpha=0.8, markersize=4)
+
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Mean Normalized Entropy")
+    ax.set_ylim(0, 1)
+    ax.set_title("Router Entropy by Category")
+    ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "entropy_by_category.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 2) GLOBAL ENTROPY COMPARISON (box plot)
+    # ============================
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    plot_data = []
+    plot_labels = []
+
+    for cat in categories:
+        entropy = category_entropy_stats[cat]["norm_entropy"].numpy().flatten()
+        entropy = entropy[np.isfinite(entropy)]
+
+        # Subsample for plotting
+        if len(entropy) > 10000:
+            entropy = np.random.choice(entropy, 10000, replace=False)
+
+        plot_data.append(entropy)
+        plot_labels.append(cat)
+
+    ax.boxplot(plot_data, labels=plot_labels, vert=True)
+    ax.set_ylabel("Normalized Entropy")
+    ax.set_title("Entropy Distribution by Category")
+    ax.tick_params(axis="x", rotation=45)
+    plt.tight_layout()
+    plt.savefig(out_dir / "entropy_category_boxplot.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 3) CONFIDENCE BREAKDOWN BY CATEGORY
+    # ============================
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    thresholds = [
+        (0.0, 0.3, "Low"),
+        (0.3, 0.5, "Med-Low"),
+        (0.5, 0.7, "Med-High"),
+        (0.7, 1.0, "High"),
+    ]
+
+    category_breakdown = {cat: [] for cat in categories}
+
+    for cat in categories:
+        entropy = category_entropy_stats[cat]["norm_entropy"].numpy().flatten()
+        total = len(entropy)
+        for low, high, _ in thresholds:
+            pct = ((entropy >= low) & (entropy < high)).sum() / total * 100
+            category_breakdown[cat].append(pct)
+
+    x = np.arange(len(categories))
+    width = 0.2
+
+    colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, len(thresholds)))
+
+    for i, (_, _, label) in enumerate(thresholds):
+        values = [category_breakdown[cat][i] for cat in categories]
+        ax.bar(x + i * width, values, width, label=label, color=colors[i])
+
+    ax.set_xlabel("Category")
+    ax.set_ylabel("Percentage of Tokens")
+    ax.set_title("Entropy Categories by Data Type")
+    ax.set_xticks(x + width * 1.5)
+    ax.set_xticklabels(categories, rotation=45, ha="right")
+    ax.legend(title="Entropy Level")
+    plt.tight_layout()
+    plt.savefig(out_dir / "entropy_category_breakdown.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 4) SUMMARY CSV
+    # ============================
+    summary_data = []
+    for cat in categories:
+        entropy = category_entropy_stats[cat]["norm_entropy"].numpy()
+        summary_data.append(
+            {
+                "category": cat,
+                "mean_entropy": np.nanmean(entropy),
+                "std_entropy": np.nanstd(entropy),
+                "median_entropy": np.nanmedian(entropy),
+                "pct_low_entropy": ((entropy < 0.3).sum() / entropy.size) * 100,
+                "pct_high_entropy": ((entropy > 0.7).sum() / entropy.size) * 100,
+            }
+        )
+
+    pd.DataFrame(summary_data).to_csv(
+        out_dir / "entropy_category_comparison.csv", index=False
+    )
+
+    print(f"Saved category comparison to {out_dir}")
+
+
+def compute_position_significance(
+    norm_entropy: torch.Tensor,
+    expert_ids: torch.Tensor,
+    token_pos: torch.Tensor,
+    position_buckets: dict,
+    num_layers: int,
+) -> dict:
+    """
+    Statistical tests for differences across position buckets.
+    """
+    significance = {}
+
+    entropy_np = norm_entropy.numpy()
+    positions_np = token_pos.numpy()
+
+    # 1. ANOVA across all buckets (per layer)
+    anova_results = []
+    for layer in range(num_layers):
+        layer_entropy = entropy_np[layer]
+        groups = []
+        for bucket_name, mask in position_buckets.items():
+            bucket_entropy = layer_entropy[mask.numpy()]
+            if len(bucket_entropy) > 0:
+                groups.append(bucket_entropy)
+
+        if len(groups) >= 2:
+            f_stat, p_val = scipy_stats.f_oneway(*groups)
+            anova_results.append({"layer": layer, "f_stat": f_stat, "p_value": p_val})
+
+    significance["anova_entropy"] = pd.DataFrame(anova_results)
+
+    # 2. Pairwise comparisons
+    pairwise_comparisons = [
+        ("0-50", "200+"),
+        ("0-50", "50-100"),
+        ("first", "0-50"),
+    ]
+
+    pairwise_results = []
+    for bucket_a, bucket_b in pairwise_comparisons:
+        if bucket_a not in position_buckets or bucket_b not in position_buckets:
+            continue
+
+        mask_a = position_buckets[bucket_a].numpy()
+        mask_b = position_buckets[bucket_b].numpy()
+
+        for layer in range(num_layers):
+            entropy_a = entropy_np[layer, mask_a]
+            entropy_b = entropy_np[layer, mask_b]
+
+            if len(entropy_a) < 2 or len(entropy_b) < 2:
+                continue
+
+            u_stat, p_val = scipy_stats.mannwhitneyu(
+                entropy_a, entropy_b, alternative="two-sided"
+            )
+
+            n1, n2 = len(entropy_a), len(entropy_b)
+            effect_size = 1 - (2 * u_stat) / (n1 * n2)
+
+            pairwise_results.append(
+                {
+                    "layer": layer,
+                    "bucket_a": bucket_a,
+                    "bucket_b": bucket_b,
+                    "mean_a": entropy_a.mean(),
+                    "mean_b": entropy_b.mean(),
+                    "u_stat": u_stat,
+                    "p_value": p_val,
+                    "effect_size": effect_size,
+                }
+            )
+
+    significance["pairwise_entropy"] = pd.DataFrame(pairwise_results)
+
+    # 3. Correlation: position vs entropy
+    correlation_results = []
+    for layer in range(num_layers):
+        layer_entropy = entropy_np[layer]
+        rho, p_val = scipy_stats.spearmanr(positions_np, layer_entropy)
+        correlation_results.append(
+            {
+                "layer": layer,
+                "spearman_rho": rho,
+                "p_value": p_val,
+            }
+        )
+
+    significance["position_entropy_correlation"] = pd.DataFrame(correlation_results)
+
+    return significance
+
+
+def analyze_position(
+    probs: torch.Tensor,
+    seq_lengths: torch.Tensor,
+    compute_significance: bool = True,
+) -> dict:
+    """
+    Analyze routing patterns by token position within sequences.
+
+    Args:
+        probs: (num_layers, total_tokens, num_experts) routing probabilities
+        seq_lengths: (num_sequences,) length of each sequence
+        compute_significance: whether to run statistical tests
+
+    Returns:
+        Dictionary with position-bucketed statistics
+    """
+    num_layers, total_tokens, num_experts = probs.shape
+
+    # Entropy
+    max_entropy = np.log(num_experts)
+    token_entropy = -torch.xlogy(probs, probs).sum(dim=-1)
+    norm_entropy = token_entropy / max_entropy
+
+    # Top-1 expert
+    expert_weight, expert_ids = torch.topk(probs, k=1, dim=-1)
+    expert_ids = expert_ids.squeeze(-1)
+    expert_weight = expert_weight.squeeze(-1)
+
+    # Position mapping
+    positions = torch.arange(total_tokens)
+    seq_starts = torch.repeat_interleave(
+        torch.cat([torch.tensor([0]), seq_lengths.cumsum(0)[:-1]]), seq_lengths
+    )
+    token_pos = positions - seq_starts
+
+    seq_indices = torch.repeat_interleave(torch.arange(len(seq_lengths)), seq_lengths)
+
+    # Position buckets
+    def _get_mask(lo=None, hi=None):
+        if lo is None and hi is None:
+            return torch.ones(total_tokens, dtype=torch.bool)
+        if lo is None:
+            return token_pos < hi
+        if hi is None:
+            return token_pos >= lo
+        return (token_pos >= lo) & (token_pos < hi)
+
+    position_buckets = {
+        "first": token_pos == 0,
+        "0-50": _get_mask(0, 50),
+        "50-100": _get_mask(50, 100),
+        "100-200": _get_mask(100, 200),
+        "200+": _get_mask(200, None),
+    }
+
+    def _get_util(mask):
+        mask_count = mask.sum().item()
+        if mask_count == 0:
+            return torch.zeros(num_layers, num_experts)
+        counts = torch.zeros(num_layers, num_experts, dtype=torch.long)
+        for layer in range(num_layers):
+            counts[layer] = torch.bincount(
+                expert_ids[layer, mask], minlength=num_experts
+            )
+        return counts.float() / mask_count
+
+    output_dict = {
+        # Bucket info
+        "position_buckets": position_buckets,
+        "bucket_names": list(position_buckets.keys()),
+        "bucket_counts": {k: v.sum().item() for k, v in position_buckets.items()},
+        # Per-bucket statistics
+        "utilization_by_position": {
+            k: _get_util(v) for k, v in position_buckets.items()
+        },
+        "entropy_by_position": {
+            k: norm_entropy[:, v].mean(dim=-1) for k, v in position_buckets.items()
+        },
+        "entropy_std_by_position": {
+            k: norm_entropy[:, v].std(dim=-1) for k, v in position_buckets.items()
+        },
+        "primary_weight_by_position": {
+            k: expert_weight[:, v].mean(dim=-1) for k, v in position_buckets.items()
+        },
+        "primary_weight_std_by_position": {
+            k: expert_weight[:, v].std(dim=-1) for k, v in position_buckets.items()
+        },
+        # Raw data
+        "token_positions": token_pos,
+        "seq_indices": seq_indices,
+        "norm_entropy": norm_entropy,
+        "expert_ids": expert_ids,
+        "expert_weight": expert_weight,
+        # Metadata
+        "num_layers": num_layers,
+        "num_experts": num_experts,
+        "total_tokens": total_tokens,
+    }
+
+    # Statistical significance
+    if compute_significance:
+        output_dict["significance"] = compute_position_significance(
+            norm_entropy, expert_ids, token_pos, position_buckets, num_layers
+        )
+
+    return output_dict
+
+
+def save_position_analysis_plots(
+    stats: dict,
+    out_dir: str | Path,
+    category: str = None,
+):
+    """
+    Generate plots for position analysis (Stage 2.5).
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    title_suffix = f" ({category})" if category else ""
+
+    bucket_names = stats["bucket_names"]
+    num_layers = stats["num_layers"]
+    num_experts = stats["num_experts"]
+
+    # ============================
+    # 1) ENTROPY BY POSITION BUCKET
+    # ============================
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    for bucket in bucket_names:
+        entropy = stats["entropy_by_position"][bucket].numpy()
+        ax.plot(np.arange(num_layers), entropy, "o-", label=bucket, markersize=4)
+
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Mean Normalized Entropy")
+    ax.set_title(f"Router Entropy by Position{title_suffix}")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "entropy_by_position.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 2) PRIMARY WEIGHT BY POSITION
+    # ============================
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    for bucket in bucket_names:
+        weight = stats["primary_weight_by_position"][bucket].numpy()
+        ax.plot(np.arange(num_layers), weight, "o-", label=bucket, markersize=4)
+
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Mean Primary Expert Weight")
+    ax.set_title(f"Router Decisiveness by Position{title_suffix}")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "primary_weight_by_position.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 3) UTILIZATION HEATMAPS BY POSITION
+    # ============================
+    n_buckets = len(bucket_names)
+    fig, axes = plt.subplots(1, n_buckets, figsize=(4 * n_buckets, 6))
+    if n_buckets == 1:
+        axes = [axes]
+
+    for ax, bucket in zip(axes, bucket_names):
+        util = stats["utilization_by_position"][bucket].numpy()
+        expected = 1.0 / num_experts
+
+        sns.heatmap(
+            util,
+            cmap="RdBu_r",
+            center=expected,
+            ax=ax,
+            cbar_kws={"label": "Utilization"},
+        )
+        ax.set_xlabel("Expert")
+        ax.set_ylabel("Layer")
+        ax.set_title(f"{bucket}\n(n={stats['bucket_counts'][bucket]:,})")
+
+    plt.suptitle(f"Expert Utilization by Position{title_suffix}")
+    plt.tight_layout()
+    plt.savefig(out_dir / "utilization_by_position.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 4) UTILIZATION DIFFERENCE FROM GLOBAL
+    # ============================
+    global_util = stats["utilization_by_position"]["0-50"]  # or compute true global
+
+    fig, axes = plt.subplots(1, n_buckets - 1, figsize=(4 * (n_buckets - 1), 6))
+    if n_buckets - 1 == 1:
+        axes = [axes]
+
+    for ax, bucket in zip(axes, [b for b in bucket_names if b != "0-50"]):
+        util = stats["utilization_by_position"][bucket].numpy()
+        diff = util - global_util.numpy()
+
+        vmax = np.abs(diff).max()
+        sns.heatmap(
+            diff,
+            cmap="RdBu_r",
+            center=0,
+            vmin=-vmax,
+            vmax=vmax,
+            ax=ax,
+            cbar_kws={"label": "Δ Utilization"},
+        )
+        ax.set_xlabel("Expert")
+        ax.set_ylabel("Layer")
+        ax.set_title(f"{bucket} vs 0-50")
+
+    plt.suptitle(f"Utilization Difference by Position{title_suffix}")
+    plt.tight_layout()
+    plt.savefig(out_dir / "utilization_diff_by_position.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 5) POSITION-ENTROPY CORRELATION
+    # ============================
+    if "significance" in stats:
+        corr_df = stats["significance"]["position_entropy_correlation"]
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        colors = ["green" if p < 0.05 else "gray" for p in corr_df["p_value"]]
+        ax.bar(corr_df["layer"], corr_df["spearman_rho"], color=colors, alpha=0.8)
+        ax.axhline(0, color="black", linewidth=0.5)
+        ax.set_xlabel("Layer")
+        ax.set_ylabel("Spearman ρ")
+        ax.set_title(f"Position-Entropy Correlation{title_suffix}\n(green = p < 0.05)")
+        ax.grid(True, alpha=0.3, axis="y")
+        plt.tight_layout()
+        plt.savefig(out_dir / "position_entropy_correlation.png", dpi=150)
+        plt.close()
+
+    # ============================
+    # 6) ANOVA SIGNIFICANCE
+    # ============================
+    if "significance" in stats:
+        anova_df = stats["significance"]["anova_entropy"]
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        layers = anova_df['layer'].values
+        f_stats = anova_df['f_stat'].values
+
+        ax.bar(layers, f_stats, color='steelblue', alpha=0.8)
+        ax.set_xlabel('Layer')
+        ax.set_ylabel('F-statistic')
+        ax.set_title(f'ANOVA F-statistic: Position Effect Strength{title_suffix}\n(higher = stronger position effect)')
+        ax.set_xticks(layers)
+        ax.grid(True, alpha=0.3, axis='y')
+        plt.tight_layout()
+        plt.savefig(out_dir / 'position_anova_fstat.png', dpi=150)
+        plt.close()
+
+    # ============================
+    # 7) BUCKET COUNTS
+    # ============================
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    counts = [stats["bucket_counts"][b] for b in bucket_names]
+    ax.bar(bucket_names, counts, color="steelblue", alpha=0.8)
+    ax.set_xlabel("Position Bucket")
+    ax.set_ylabel("Token Count")
+    ax.set_title(f"Tokens per Position Bucket{title_suffix}")
+
+    for i, c in enumerate(counts):
+        ax.text(i, c, f"{c:,}", ha="center", va="bottom", fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(out_dir / "position_bucket_counts.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 8) SAVE STATISTICS
+    # ============================
+    # Summary CSV
+    summary_data = []
+    for bucket in bucket_names:
+        entropy = stats["entropy_by_position"][bucket].numpy()
+        weight = stats["primary_weight_by_position"][bucket].numpy()
+        summary_data.append(
+            {
+                "bucket": bucket,
+                "token_count": stats["bucket_counts"][bucket],
+                "entropy_mean": entropy.mean(),
+                "entropy_std": entropy.std(),
+                "primary_weight_mean": weight.mean(),
+                "primary_weight_std": weight.std(),
+            }
+        )
+    pd.DataFrame(summary_data).to_csv(out_dir / "position_summary.csv", index=False)
+
+    # Significance CSVs
+    if "significance" in stats:
+        stats["significance"]["anova_entropy"].to_csv(
+            out_dir / "significance_anova.csv", index=False
+        )
+        stats["significance"]["pairwise_entropy"].to_csv(
+            out_dir / "significance_pairwise.csv", index=False
+        )
+        stats["significance"]["position_entropy_correlation"].to_csv(
+            out_dir / "significance_correlation.csv", index=False
+        )
+
+    print(f"Saved position analysis to {out_dir}")
 
 
 def main():
@@ -945,6 +1967,15 @@ def main():
     args = parser.parse_args()
 
     device = torch.device(DEVICE)
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    logit_out_dir = out_dir / "logits"
+    logit_out_dir.mkdir(exist_ok=True)
+
+    unique_categories = [x.category for x in DEFAULT_SOURCES]
+    print(f"{unique_categories} Categories")
 
     # load model
     model = build_model(MODEL_NAME, device)
@@ -957,20 +1988,12 @@ def main():
         seed=42,
         num_workers=8,
     )
-    unique_categories = list(set(dataset.categories))
-    print(f"{unique_categories} Categories")
-
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     ### Run forward pass on all data and save router logits
 
     # Attach router observation hooks (same for all modes)
     routing_store = {}
     num_layers = attach_router_hooks(model, routing_store)
-
-    logit_out_dir = out_dir / "logits"
-    logit_out_dir.mkdir(exist_ok=True)
 
     all_results = {}
     outer = tqdm(unique_categories, desc="categories", position=0)
@@ -1018,16 +2041,37 @@ def main():
     global_logits = torch.cat(global_logits, dim=1)
     sequence_lengths = torch.cat(sequence_lengths, dim=0)
 
-    stats = compute_baseline_stats(global_logits)
-    save_baseline_routing_plots(stats, out_dir / "global", num_experts=args.num_experts)
+    stats = compute_baseline_stats(logits=global_logits)
+    save_baseline_routing_plots(
+        stats=stats, out_dir=out_dir / "global", num_experts=args.num_experts
+    )
 
-    stats = compute_routing_weights_stats(global_logits, top_k=2)
-    save_routing_weight_plots(stats, out_dir / "routing")
+    stats = compute_routing_weights_stats(probs=global_logits, top_k=2)
+    save_routing_weight_plots(stats=stats, out_dir=out_dir / "routing")
 
-    analyze_routing_weights_by_category(logit_dict, out_dir / "routing_category")
+    analyze_routing_weights_by_category(
+        category_data=logit_dict, out_dir=out_dir / "routing_category"
+    )
 
-    stats = analyze_entropy(
-        global_logits, sequence_lengths, num_experts=args.num_experts, k=20
+    entropy_stats = analyze_entropy(
+        probs=global_logits,
+        seq_lengths=sequence_lengths,
+        num_experts=args.num_experts,
+        k=20,
+    )
+    save_entropy_analysis_plots(
+        entropy_stats=entropy_stats,
+        dataset=dataset,
+        tokenizer=tokenizer,
+        out_dir=out_dir / "entropy" / "global",
+        category=None,
+    )
+
+    position_stats = analyze_position(
+        probs=global_logits, seq_lengths=sequence_lengths, compute_significance=True
+    )
+    save_position_analysis_plots(
+        stats=position_stats, out_dir=out_dir / "position", category=None
     )
 
 

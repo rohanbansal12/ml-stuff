@@ -1,0 +1,212 @@
+=== Extreme Entropy Tokens ===
+
+============================================================
+HIGH ENTROPY TOKENS (Router Uncertain)
+============================================================
+
+[1] Entropy: 0.9740
+    Token: '9' (id=24)
+    Position: seq=135, pos=453
+    Context: 25461>>>9<<<092, 
+
+[2] Entropy: 0.9739
+    Token: '9' (id=24)
+    Position: seq=135, pos=509
+    Context: 05508>>>9<<<64
+
+[3] Entropy: 0.9736
+    Token: '7' (id=22)
+    Position: seq=135, pos=496
+    Context: 76844>>>7<<<737, 
+
+[4] Entropy: 0.9736
+    Token: '9' (id=24)
+    Position: seq=135, pos=479
+    Context: .1496>>>9<<<60031
+
+[5] Entropy: 0.9733
+    Token: '9' (id=24)
+    Position: seq=135, pos=423
+    Context: .2798>>>9<<<29273
+
+[6] Entropy: 0.9732
+    Token: '9' (id=24)
+    Position: seq=135, pos=467
+    Context: 25830>>>9<<<124, 
+
+[7] Entropy: 0.9727
+    Token: '1' (id=16)
+    Position: seq=135, pos=452
+    Context: 12546>>>1<<<9092,
+
+[8] Entropy: 0.9723
+    Token: '4' (id=19)
+    Position: seq=135, pos=439
+    Context: 66419>>>4<<<279, 
+
+[9] Entropy: 0.9723
+    Token: '6' (id=21)
+    Position: seq=135, pos=451
+    Context: .1254>>>6<<<19092
+
+[10] Entropy: 0.9718
+    Token: '4' (id=19)
+    Position: seq=135, pos=495
+    Context: 07684>>>4<<<7737,
+
+[11] Entropy: 0.9718
+    Token: '4' (id=19)
+    Position: seq=135, pos=494
+    Context: .0768>>>4<<<47737
+
+[12] Entropy: 0.9717
+    Token: '0' (id=15)
+    Position: seq=135, pos=466
+    Context: 12583>>>0<<<9124,
+
+[13] Entropy: 0.9717
+    Token: '1' (id=16)
+    Position: seq=135, pos=437
+    Context: .1664>>>1<<<94279
+
+[14] Entropy: 0.9716
+    Token: '1' (id=16)
+    Position: seq=135, pos=468
+    Context: 58309>>>1<<<24, 0
+
+[15] Entropy: 0.9713
+    Token: '4' (id=19)
+    Position: seq=135, pos=511
+    Context: 50896>>>4<<<
+
+[16] Entropy: 0.9707
+    Token: '2' (id=17)
+    Position: seq=135, pos=440
+    Context: 64194>>>2<<<79, 0
+
+[17] Entropy: 0.9706
+    Token: '9' (id=24)
+    Position: seq=131, pos=434
+    Context: 51144>>>9<<<1dae2b',
+
+
+[18] Entropy: 0.9704
+    Token: '9' (id=24)
+    Position: seq=135, pos=425
+    Context: 79892>>>9<<<273, 
+
+[19] Entropy: 0.9701
+    Token: '1' (id=16)
+    Position: seq=135, pos=411
+    Context: 13779>>>1<<<803, 
+
+[20] Entropy: 0.9701
+    Token: '4' (id=19)
+    Position: seq=131, pos=433
+    Context: cb5114>>>4<<<91dae2b
+
+
+============================================================
+LOW ENTROPY TOKENS (Router Confident)
+============================================================
+
+[1] Entropy: 0.6444
+    Token: ' Dunn' (id=63745)
+    Position: seq=21, pos=8
+    Context:  Winfield Culberson>>> Dunn<<< (born July 1
+
+[2] Entropy: 0.6457
+    Token: 'bk' (id=40029)
+    Position: seq=7, pos=9
+    Context:  (Persero) T>>>bk<<< (), known as Garuda
+
+[3] Entropy: 0.6477
+    Token: ' ()' (id=1719)
+    Position: seq=31, pos=5
+    Context: Noah Baumbach>>> ()<<< (born September 3
+
+[4] Entropy: 0.6493
+    Token: 'ul' (id=360)
+    Position: seq=90, pos=5
+    Context: Sharon Christa McA>>>ul<<<iffe (September 2
+
+[5] Entropy: 0.6498
+    Token: ' city' (id=3283)
+    Position: seq=24, pos=4
+    Context: Toledo is a>>> city<<< in Iowa in the United
+
+[6] Entropy: 0.6513
+    Token: '3' (id=18)
+    Position: seq=15, pos=3
+    Context: 199>>>3<<< FIFA U-17
+
+[7] Entropy: 0.6514
+    Token: ' –' (id=1365)
+    Position: seq=38, pos=13
+    Context:  1933>>> –<<< 6 October 2
+
+[8] Entropy: 0.6534
+    Token: 'born' (id=15998)
+    Position: seq=88, pos=5
+    Context: George Richard Chamberlain (>>>born<<< March 31,
+
+[9] Entropy: 0.6538
+    Token: ' by' (id=553)
+    Position: seq=386, pos=3
+    Context: E-text prepared>>> by<<< Barbara Tozier, Bill
+
+[10] Entropy: 0.6539
+    Token: ' by' (id=553)
+    Position: seq=385, pos=3
+    Context: E-text prepared>>> by<<< D Alexander and the Project
+
+[11] Entropy: 0.6540
+    Token: 'in' (id=258)
+    Position: seq=11, pos=5
+    Context: Andriy Voron>>>in<<< (born 21
+
+[12] Entropy: 0.6542
+    Token: ' by' (id=553)
+    Position: seq=304, pos=3
+    Context: E-text prepared>>> by<<< Stephen Hope, Joseph Cooper
+
+[13] Entropy: 0.6543
+    Token: ' by' (id=553)
+    Position: seq=362, pos=3
+    Context: E-text prepared>>> by<<< Larry Harrison, Cindy B
+
+[14] Entropy: 0.6543
+    Token: ' by' (id=553)
+    Position: seq=395, pos=3
+    Context: E-text prepared>>> by<<< Roger Frank and the Project
+
+[15] Entropy: 0.6545
+    Token: ' Van' (id=12710)
+    Position: seq=22, pos=11
+    Context:  American series created by Chris>>> Van<<< Dusen and produced
+
+[16] Entropy: 0.6546
+    Token: ' como' (id=7953)
+    Position: seq=268, pos=2
+    Context: escribe>>> como<<< iniciarías una conversación
+
+[17] Entropy: 0.6565
+    Token: ' are' (id=525)
+    Position: seq=77, pos=4
+    Context: Dead Kennedys>>> are<<< a hardcore punk band from
+
+[18] Entropy: 0.6567
+    Token: 'f' (id=69)
+    Position: seq=127, pos=42
+    Context: github.com/stefan>>>f<<<oulis/django-ph
+
+[19] Entropy: 0.6572
+    Token: 'ux' (id=2200)
+    Position: seq=14, pos=13
+    Context: : Impasse des De>>>ux<<< Anges) is a
+
+[20] Entropy: 0.6590
+    Token: ' that' (id=429)
+    Position: seq=73, pos=13
+    Context:  the social system or belief>>> that<<< gender is binary and that
+

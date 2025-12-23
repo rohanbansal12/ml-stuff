@@ -4,8 +4,8 @@ Total layers: 24
 Experts per layer: 60
 Expected utilization: 0.0167
 
-Dead experts (total across layers): 4
-Overloaded experts (total across layers): 88
+Dead experts (total across layers): 1
+Overloaded experts (total across layers): 43
 
-Mean CoV across layers: 0.5455 (std=0.0723)
-Mean entropy across layers: 0.8621 (std=0.0412)
+Mean CoV across layers: 0.4439 (std=0.0722)
+Mean entropy across layers: 0.8582 (std=0.0427)

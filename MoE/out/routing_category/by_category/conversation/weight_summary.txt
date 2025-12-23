@@ -1,27 +1,27 @@
 === Routing Weight Statistics (conversation) ===
 
 Top-k: 2
-Total tokens: 168
+Total tokens: 11,141
 Num layers: 24
 Num experts: 60
 
 Primary Expert Weight:
-  Overall mean:   0.6265
-  Overall median: 0.6039
-  Overall std:    0.1013
-  Layer range:    [0.5947, 0.6624]
+  Overall mean:   0.6201
+  Overall median: 0.6002
+  Overall std:    0.0944
+  Layer range:    [0.5959, 0.6514]
 
 Weight Difference (primary - secondary):
-  Overall mean:   0.2530
-  Layer range:    [0.1894, 0.3249]
+  Overall mean:   0.2403
+  Layer range:    [0.1918, 0.3029]
 
 Weight Ratio (primary / secondary):
-  Overall median: 1.52
-  95th pctl:      4.85
+  Overall median: 1.50
+  95th pctl:      4.08
 
 Decisiveness Breakdown (all tokens):
-  Balanced (0.5-0.6): 48.1%
-  Moderate (0.6-0.7): 31.1%
-  Decisive (0.7-0.8): 13.7%
-  Strong (0.8-0.9): 5.2%
-  Dominant (0.9-1.0): 1.8%
+  Balanced (0.5-0.6): 49.8%
+  Moderate (0.6-0.7): 30.4%
+  Decisive (0.7-0.8): 14.5%
+  Strong (0.8-0.9): 4.4%
+  Dominant (0.9-1.0): 0.8%
