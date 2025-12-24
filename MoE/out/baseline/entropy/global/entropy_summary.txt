@@ -24,4 +24,4 @@ High Entropy Token Examples (router uncertain):
   ['9', '9', '7', '9', '9', '9', '1', '4', '6', '4', '4', '0', '1', '1', '4', '2', '9', '9', '1', '4']
 
 Low Entropy Token Examples (router confident):
-  [' Dunn', 'bk', ' ()', 'ul', ' city', '3', ' –', 'born', ' by', ' by', 'in', ' by', ' by', ' by', ' Van', ' como', ' are', 'f', 'ux', ' that']
+  [' the', ' the', ' the', ' the', ' a', 'o', ' the', ' a', ' by', ' by', ' a', ' by', ' by', ' by', ' the', 'arm', ' her', 'f', ' at', ' to']

@@ -1,6 +1,6 @@
 import torch
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
-from typing import Dict, List, Callable, Optional
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer
+from typing import Dict, List, Callable, Optional, Set
 import argparse
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -8,17 +8,18 @@ import seaborn as sns
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from scipy import stats as scipy_stats
 import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from MoE.baseline.data import DEFAULT_SOURCES, load_multi_source_data
-from scipy import stats as scipy_stats
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from MoE.data import DEFAULT_SOURCES, load_multi_source_data
+
 
 MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def build_model(
+def build_model_and_tokenizer(
     model_name: str,
     device: torch.device,
 ) -> tuple:
@@ -44,7 +45,11 @@ def build_model(
 
     model.eval()
 
-    return model
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    return model, tokenizer
 
 
 def get_router_hook(layer_idx: int, store: Dict[int, List[torch.Tensor]]) -> Callable:
@@ -1893,17 +1898,19 @@ def save_position_analysis_plots(
 
         fig, ax = plt.subplots(figsize=(10, 5))
 
-        layers = anova_df['layer'].values
-        f_stats = anova_df['f_stat'].values
+        layers = anova_df["layer"].values
+        f_stats = anova_df["f_stat"].values
 
-        ax.bar(layers, f_stats, color='steelblue', alpha=0.8)
-        ax.set_xlabel('Layer')
-        ax.set_ylabel('F-statistic')
-        ax.set_title(f'ANOVA F-statistic: Position Effect Strength{title_suffix}\n(higher = stronger position effect)')
+        ax.bar(layers, f_stats, color="steelblue", alpha=0.8)
+        ax.set_xlabel("Layer")
+        ax.set_ylabel("F-statistic")
+        ax.set_title(
+            f"ANOVA F-statistic: Position Effect Strength{title_suffix}\n(higher = stronger position effect)"
+        )
         ax.set_xticks(layers)
-        ax.grid(True, alpha=0.3, axis='y')
+        ax.grid(True, alpha=0.3, axis="y")
         plt.tight_layout()
-        plt.savefig(out_dir / 'position_anova_fstat.png', dpi=150)
+        plt.savefig(out_dir / "position_anova_fstat.png", dpi=150)
         plt.close()
 
     # ============================
@@ -1959,9 +1966,570 @@ def save_position_analysis_plots(
     print(f"Saved position analysis to {out_dir}")
 
 
+def analyze_cross_layer_consistency(
+    probs: torch.Tensor,
+    top_k: int = 1,
+) -> dict:
+    """
+    Analyze routing consistency across layers.
+
+    Args:
+        probs: (num_layers, total_tokens, num_experts) routing probabilities
+        top_k: number of top experts to consider for routing decisions
+
+    Returns:
+        Dictionary with cross-layer routing statistics
+    """
+    num_layers, total_tokens, num_experts = probs.shape
+
+    # Get top-k expert selections per layer
+    _, expert_ids = torch.topk(probs, k=top_k, dim=-1)
+    if top_k == 1:
+        expert_ids = expert_ids.squeeze(-1)  # (num_layers, total_tokens)
+    else:
+        expert_ids = expert_ids[:, :, 0]  # Use top-1 for consistency analysis
+
+    output_dict = {
+        "num_layers": num_layers,
+        "num_experts": num_experts,
+        "total_tokens": total_tokens,
+    }
+
+    # ============================
+    # 1. TRANSITION MATRICES (adjacent layers)
+    # ============================
+    # For each pair of adjacent layers, compute P(expert_j in layer L+1 | expert_i in layer L)
+    transition_matrices = []
+
+    for layer in range(num_layers - 1):
+        current_experts = expert_ids[layer]  # (total_tokens,)
+        next_experts = expert_ids[layer + 1]  # (total_tokens,)
+
+        # Count transitions
+        transition_counts = torch.zeros(num_experts, num_experts, dtype=torch.long)
+        for i in range(num_experts):
+            mask = current_experts == i
+            if mask.sum() > 0:
+                next_exp = next_experts[mask]
+                counts = torch.bincount(next_exp, minlength=num_experts)
+                transition_counts[i] = counts
+
+        # Normalize to probabilities (row-stochastic)
+        row_sums = transition_counts.sum(dim=1, keepdim=True).float()
+        row_sums = torch.clamp(row_sums, min=1)  # Avoid division by zero
+        transition_probs = transition_counts.float() / row_sums
+
+        transition_matrices.append(transition_probs)
+
+    output_dict["transition_matrices"] = torch.stack(
+        transition_matrices
+    )  # (num_layers-1, num_experts, num_experts)
+
+    # ============================
+    # 2. MUTUAL INFORMATION BETWEEN LAYERS
+    # ============================
+    mutual_info = torch.zeros(num_layers, num_layers)
+
+    for i in range(num_layers):
+        for j in range(i, num_layers):
+            if i == j:
+                # Self MI is entropy
+                expert_counts = torch.bincount(
+                    expert_ids[i], minlength=num_experts
+                ).float()
+                p = expert_counts / total_tokens
+                p = p[p > 0]
+                mi = -(p * torch.log(p)).sum()
+            else:
+                # Joint distribution
+                joint_counts = torch.zeros(num_experts, num_experts)
+                for ei in range(num_experts):
+                    mask = expert_ids[i] == ei
+                    if mask.sum() > 0:
+                        ej_counts = torch.bincount(
+                            expert_ids[j, mask], minlength=num_experts
+                        )
+                        joint_counts[ei] = ej_counts.float()
+
+                joint_p = joint_counts / total_tokens
+
+                # Marginals
+                p_i = joint_p.sum(dim=1)
+                p_j = joint_p.sum(dim=0)
+
+                # MI = sum p(i,j) * log(p(i,j) / (p(i) * p(j)))
+                mi = 0.0
+                for ei in range(num_experts):
+                    for ej in range(num_experts):
+                        if joint_p[ei, ej] > 0 and p_i[ei] > 0 and p_j[ej] > 0:
+                            mi += joint_p[ei, ej] * torch.log(
+                                joint_p[ei, ej] / (p_i[ei] * p_j[ej])
+                            )
+
+            mutual_info[i, j] = mi
+            mutual_info[j, i] = mi
+
+    output_dict["mutual_information"] = mutual_info
+
+    # Normalize MI by max possible (entropy)
+    max_entropy = np.log(num_experts)
+    output_dict["normalized_mutual_info"] = mutual_info / max_entropy
+
+    # ============================
+    # 3. ADJACENT LAYER AGREEMENT
+    # ============================
+    # What fraction of tokens go to the same expert in consecutive layers?
+    same_expert_rate = []
+    for layer in range(num_layers - 1):
+        same = (expert_ids[layer] == expert_ids[layer + 1]).float().mean()
+        same_expert_rate.append(same.item())
+
+    output_dict["same_expert_rate"] = torch.tensor(same_expert_rate)
+    output_dict["expected_same_rate"] = 1.0 / num_experts  # Random baseline
+
+    # ============================
+    # 4. ROUTING TRAJECTORY CLUSTERING
+    # ============================
+    # Represent each token by its full routing path, find common patterns
+    # Use a subset of tokens for computational efficiency
+    max_tokens_for_clustering = min(10000, total_tokens)
+    sample_idx = torch.randperm(total_tokens)[:max_tokens_for_clustering]
+
+    routing_paths = expert_ids[:, sample_idx].T  # (sampled_tokens, num_layers)
+
+    # Convert paths to strings for counting unique patterns
+    path_strings = ["-".join(map(str, path.tolist())) for path in routing_paths]
+
+    from collections import Counter
+
+    path_counts = Counter(path_strings)
+
+    # Top 20 most common paths
+    top_paths = path_counts.most_common(20)
+    output_dict["top_routing_paths"] = [
+        {
+            "path": p[0],
+            "count": p[1],
+            "frequency": p[1] / max_tokens_for_clustering,
+        }
+        for p in top_paths
+    ]
+    output_dict["num_unique_paths"] = len(path_counts)
+    output_dict["path_concentration"] = (
+        sum(c for _, c in top_paths) / max_tokens_for_clustering
+    )
+
+    # ============================
+    # 5. LAYER-WISE ROUTING ENTROPY
+    # ============================
+    # How predictable is the next layer's routing given current layer?
+    conditional_entropy = []
+
+    for layer in range(num_layers - 1):
+        # H(L+1 | L) = H(L, L+1) - H(L)
+        # H(L, L+1) = -sum p(i,j) log p(i,j)
+        # H(L) = -sum p(i) log p(i)
+
+        joint_counts = torch.zeros(num_experts, num_experts)
+        for ei in range(num_experts):
+            mask = expert_ids[layer] == ei
+            if mask.sum() > 0:
+                ej_counts = torch.bincount(
+                    expert_ids[layer + 1, mask], minlength=num_experts
+                )
+                joint_counts[ei] = ej_counts.float()
+
+        joint_p = joint_counts / total_tokens
+        p_current = joint_p.sum(dim=1)
+
+        # Joint entropy
+        joint_p_flat = joint_p.flatten()
+        joint_p_flat = joint_p_flat[joint_p_flat > 0]
+        h_joint = -(joint_p_flat * torch.log(joint_p_flat)).sum()
+
+        # Marginal entropy
+        p_current = p_current[p_current > 0]
+        h_current = -(p_current * torch.log(p_current)).sum()
+
+        # Conditional entropy
+        h_cond = h_joint - h_current
+        conditional_entropy.append(h_cond.item())
+
+    output_dict["conditional_entropy"] = torch.tensor(conditional_entropy)
+    output_dict["conditional_entropy_normalized"] = (
+        torch.tensor(conditional_entropy) / max_entropy
+    )
+
+    # ============================
+    # 6. "STICKY" EXPERT PAIRS
+    # ============================
+    # Which expert pairs (layer L -> layer L+1) occur much more than expected?
+    sticky_pairs = []
+
+    for layer in range(num_layers - 1):
+        trans = output_dict["transition_matrices"][layer]
+
+        # Expected under independence
+        marginal_current = torch.bincount(
+            expert_ids[layer], minlength=num_experts
+        ).float()
+        marginal_current = marginal_current / total_tokens
+        marginal_next = torch.bincount(
+            expert_ids[layer + 1], minlength=num_experts
+        ).float()
+        marginal_next = marginal_next / total_tokens
+
+        expected = marginal_current.unsqueeze(1) * marginal_next.unsqueeze(0)
+
+        # Observed
+        joint_counts = torch.zeros(num_experts, num_experts)
+        for ei in range(num_experts):
+            mask = expert_ids[layer] == ei
+            if mask.sum() > 0:
+                ej_counts = torch.bincount(
+                    expert_ids[layer + 1, mask], minlength=num_experts
+                )
+                joint_counts[ei] = ej_counts.float()
+        observed = joint_counts / total_tokens
+
+        # Ratio (observed / expected)
+        ratio = observed / (expected + 1e-8)
+
+        # Find pairs with highest ratio
+        top_k_pairs = 5
+        flat_ratio = ratio.flatten()
+        top_vals, top_idx = torch.topk(flat_ratio, top_k_pairs)
+
+        for val, idx in zip(top_vals, top_idx):
+            ei = idx // num_experts
+            ej = idx % num_experts
+            sticky_pairs.append(
+                {
+                    "layer": layer,
+                    "expert_from": ei.item(),
+                    "expert_to": ej.item(),
+                    "observed": observed[ei, ej].item(),
+                    "expected": expected[ei, ej].item(),
+                    "ratio": val.item(),
+                }
+            )
+
+    output_dict["sticky_pairs"] = pd.DataFrame(sticky_pairs)
+
+    return output_dict
+
+
+def save_cross_layer_plots(
+    stats: dict,
+    out_dir: str | Path,
+    category: Optional[str] = None,
+):
+    """
+    Generate plots for cross-layer routing consistency analysis.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    title_suffix = f" ({category})" if category else ""
+
+    num_layers = stats["num_layers"]
+    num_experts = stats["num_experts"]
+
+    # ============================
+    # 1) MUTUAL INFORMATION HEATMAP
+    # ============================
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    mi = stats["normalized_mutual_info"].numpy()
+
+    sns.heatmap(
+        mi,
+        cmap="viridis",
+        ax=ax,
+        cbar_kws={"label": "Normalized MI"},
+        xticklabels=range(num_layers),
+        yticklabels=range(num_layers),
+    )
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Layer")
+    ax.set_title(f"Mutual Information Between Layers{title_suffix}")
+    plt.tight_layout()
+    plt.savefig(out_dir / "mutual_information_heatmap.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 2) ADJACENT LAYER AGREEMENT
+    # ============================
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    same_rate = stats["same_expert_rate"].numpy()
+    expected = stats["expected_same_rate"]
+
+    layers = np.arange(len(same_rate))
+    ax.bar(layers, same_rate, color="steelblue", alpha=0.8)
+    ax.axhline(
+        expected, color="red", linestyle="--", label=f"Random baseline ({expected:.3f})"
+    )
+
+    ax.set_xlabel("Layer Transition (L → L+1)")
+    ax.set_ylabel("Same Expert Rate")
+    ax.set_title(f"Adjacent Layer Routing Agreement{title_suffix}")
+    ax.set_xticks(layers)
+    ax.set_xticklabels([f"{i}→{i + 1}" for i in layers], rotation=45, ha="right")
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+    plt.tight_layout()
+    plt.savefig(out_dir / "adjacent_layer_agreement.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 3) CONDITIONAL ENTROPY
+    # ============================
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    cond_entropy = stats["conditional_entropy_normalized"].numpy()
+
+    ax.plot(np.arange(len(cond_entropy)), cond_entropy, "o-", color="purple")
+    ax.axhline(1.0, color="red", linestyle="--", label="Max entropy (independent)")
+
+    ax.set_xlabel("Layer Transition (L → L+1)")
+    ax.set_ylabel("Normalized Conditional Entropy")
+    ax.set_title(f"Routing Predictability{title_suffix}\n(lower = more predictable)")
+    ax.set_xticks(np.arange(len(cond_entropy)))
+    ax.set_xticklabels(
+        [f"{i}→{i + 1}" for i in range(len(cond_entropy))], rotation=45, ha="right"
+    )
+    ax.set_ylim(0, 1.1)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "conditional_entropy.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 4) SAMPLE TRANSITION MATRICES
+    # ============================
+    # Show 4 transition matrices from different parts of the network
+    sample_layers = [0, num_layers // 3, 2 * num_layers // 3, num_layers - 2]
+    sample_layers = [l for l in sample_layers if l < num_layers - 1]
+
+    fig, axes = plt.subplots(1, len(sample_layers), figsize=(5 * len(sample_layers), 5))
+    if len(sample_layers) == 1:
+        axes = [axes]
+
+    for ax, layer in zip(axes, sample_layers):
+        trans = stats["transition_matrices"][layer].numpy()
+
+        sns.heatmap(
+            trans,
+            cmap="Blues",
+            ax=ax,
+            cbar=True,
+            vmin=0,
+            vmax=trans.max(),
+            xticklabels=10,
+            yticklabels=10,
+        )
+        ax.set_xlabel(f"Expert (Layer {layer + 1})")
+        ax.set_ylabel(f"Expert (Layer {layer})")
+        ax.set_title(f"Transition {layer}→{layer + 1}")
+
+    plt.suptitle(f"Routing Transition Matrices{title_suffix}")
+    plt.tight_layout()
+    plt.savefig(out_dir / "transition_matrices.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 5) TRANSITION MATRIX DIAGONAL STRENGTH
+    # ============================
+    # How much of the probability mass is on the diagonal (same expert)?
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    diagonal_mass = []
+    for layer in range(num_layers - 1):
+        trans = stats["transition_matrices"][layer].numpy()
+        diag_sum = np.trace(trans) / num_experts  # Average diagonal probability
+        diagonal_mass.append(diag_sum)
+
+    ax.bar(np.arange(len(diagonal_mass)), diagonal_mass, color="teal", alpha=0.8)
+    ax.axhline(
+        1.0 / num_experts,
+        color="red",
+        linestyle="--",
+        label=f"Random ({1.0 / num_experts:.3f})",
+    )
+    ax.set_xlabel("Layer Transition")
+    ax.set_ylabel("Mean Diagonal Probability")
+    ax.set_title(f"Same-Expert Transition Strength{title_suffix}")
+    ax.set_xticks(np.arange(len(diagonal_mass)))
+    ax.set_xticklabels(
+        [f"{i}→{i + 1}" for i in range(len(diagonal_mass))], rotation=45, ha="right"
+    )
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+    plt.tight_layout()
+    plt.savefig(out_dir / "diagonal_transition_strength.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 6) MI DECAY WITH LAYER DISTANCE
+    # ============================
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    mi = stats["normalized_mutual_info"].numpy()
+
+    # Group MI by layer distance
+    max_distance = num_layers - 1
+    distances = list(range(1, max_distance + 1))
+    mi_by_distance = []
+
+    for d in distances:
+        mi_values = []
+        for i in range(num_layers - d):
+            mi_values.append(mi[i, i + d])
+        mi_by_distance.append(
+            {
+                "distance": d,
+                "mean_mi": np.mean(mi_values),
+                "std_mi": np.std(mi_values),
+            }
+        )
+
+    mi_df = pd.DataFrame(mi_by_distance)
+
+    ax.errorbar(
+        mi_df["distance"],
+        mi_df["mean_mi"],
+        yerr=mi_df["std_mi"],
+        fmt="o-",
+        capsize=3,
+        color="steelblue",
+    )
+    ax.set_xlabel("Layer Distance")
+    ax.set_ylabel("Normalized Mutual Information")
+    ax.set_title(f"MI Decay with Layer Distance{title_suffix}")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / "mi_decay_with_distance.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 7) TOP ROUTING PATHS
+    # ============================
+    top_paths = stats["top_routing_paths"]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    paths = [
+        p["path"][:30] + "..." if len(p["path"]) > 30 else p["path"]
+        for p in top_paths[:15]
+    ]
+    freqs = [p["frequency"] * 100 for p in top_paths[:15]]
+
+    y_pos = np.arange(len(paths))
+    ax.barh(y_pos, freqs, color="coral", alpha=0.8)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(paths, fontsize=8)
+    ax.set_xlabel("Frequency (%)")
+    ax.set_title(
+        f"Top Routing Paths{title_suffix}\n({stats['num_unique_paths']:,} unique paths)"
+    )
+    ax.invert_yaxis()
+    plt.tight_layout()
+    plt.savefig(out_dir / "top_routing_paths.png", dpi=150)
+    plt.close()
+
+    # ============================
+    # 8) SAVE STATISTICS
+    # ============================
+    # Summary CSV
+    summary_data = {
+        "metric": [
+            "num_unique_paths",
+            "path_concentration_top20",
+            "mean_same_expert_rate",
+            "expected_same_expert_rate",
+            "mean_conditional_entropy",
+            "mean_mutual_info_adjacent",
+        ],
+        "value": [
+            stats["num_unique_paths"],
+            stats["path_concentration"],
+            stats["same_expert_rate"].mean().item(),
+            stats["expected_same_rate"],
+            stats["conditional_entropy_normalized"].mean().item(),
+            stats["normalized_mutual_info"].diagonal(offset=1).mean().item(),
+        ],
+    }
+    pd.DataFrame(summary_data).to_csv(out_dir / "cross_layer_summary.csv", index=False)
+
+    # Sticky pairs
+    if "sticky_pairs" in stats and not stats["sticky_pairs"].empty:
+        stats["sticky_pairs"].sort_values("ratio", ascending=False).head(50).to_csv(
+            out_dir / "sticky_expert_pairs.csv", index=False
+        )
+
+    # MI decay
+    mi_df.to_csv(out_dir / "mi_by_distance.csv", index=False)
+
+    # Text summary
+    with open(out_dir / "cross_layer_summary.txt", "w") as f:
+        f.write(f"=== Cross-Layer Routing Consistency{title_suffix} ===\n\n")
+        f.write(f"Layers: {num_layers}\n")
+        f.write(f"Experts: {num_experts}\n")
+        f.write(f"Tokens analyzed: {stats['total_tokens']:,}\n\n")
+
+        f.write("Routing Path Diversity:\n")
+        f.write(f"  Unique paths: {stats['num_unique_paths']:,}\n")
+        f.write(
+            f"  Top 20 paths cover: {stats['path_concentration'] * 100:.1f}% of tokens\n\n"
+        )
+
+        f.write("Adjacent Layer Agreement:\n")
+        f.write(f"  Mean same-expert rate: {stats['same_expert_rate'].mean():.4f}\n")
+        f.write(f"  Random baseline: {stats['expected_same_rate']:.4f}\n")
+        f.write(
+            f"  Ratio vs random: {stats['same_expert_rate'].mean() / stats['expected_same_rate']:.2f}x\n\n"
+        )
+
+        f.write("Routing Predictability:\n")
+        f.write(
+            f"  Mean conditional entropy: {stats['conditional_entropy_normalized'].mean():.4f}\n"
+        )
+        f.write("  (1.0 = independent, 0.0 = fully predictable)\n\n")
+
+        f.write("Top 10 Most Common Routing Paths:\n")
+        for i, p in enumerate(top_paths[:10]):
+            f.write(f"  {i + 1}. {p['path']} ({p['frequency'] * 100:.2f}%)\n")
+
+    print(f"Saved cross-layer analysis to {out_dir}")
+
+
+def load_logits(logit_out_dir: Path, categories: Optional[List | Set] = None):
+    logit_dict = {}
+    global_logits = []
+    sequence_lengths = []
+
+    if categories is None:
+        categories = list(x.stem for x in logit_out_dir.glob("*.pt"))
+
+    for category in categories:
+        category_dict = torch.load(logit_out_dir / f"{category}.pt")
+        logit_dict[category] = category_dict
+        global_logits.append(category_dict["logits"])
+        sequence_lengths.append(category_dict["token_counts"])
+
+    global_logits = torch.cat(global_logits, dim=1)
+    sequence_lengths = torch.cat(sequence_lengths, dim=0)
+
+    return logit_dict, global_logits, sequence_lengths
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out_dir", type=str, default="/workspace/ml-stuff/MoE/out/baseline")
+    parser.add_argument(
+        "--out_dir", type=str, default="/workspace/ml-stuff/MoE/out/baseline"
+    )
     parser.add_argument("--samples", type=int, default=50)
     parser.add_argument("--num_experts", type=int, default=60)
     args = parser.parse_args()
@@ -1978,7 +2546,7 @@ def main():
     print(f"{unique_categories} Categories")
 
     # load model
-    model = build_model(MODEL_NAME, device)
+    model, tokenizer = build_model_and_tokenizer(MODEL_NAME, device)
 
     # load data
     dataloader, dataset, tokenizer = load_multi_source_data(
@@ -2029,17 +2597,9 @@ def main():
         torch.save(all_results[category], logit_out_dir / f"{category}.pt")
 
     ### load category-wise outputs and compute stats
-    logit_dict = {}
-    global_logits = []
-    sequence_lengths = []
-    for category in unique_categories:
-        category_dict = torch.load(logit_out_dir / f"{category}.pt")
-        logit_dict[category] = category_dict
-        global_logits.append(category_dict["logits"])
-        sequence_lengths.append(category_dict["token_counts"])
-
-    global_logits = torch.cat(global_logits, dim=1)
-    sequence_lengths = torch.cat(sequence_lengths, dim=0)
+    logit_dict, global_logits, sequence_lengths = load_logits(
+        logit_out_dir, unique_categories
+    )
 
     stats = compute_baseline_stats(logits=global_logits)
     save_baseline_routing_plots(
@@ -2072,6 +2632,11 @@ def main():
     )
     save_position_analysis_plots(
         stats=position_stats, out_dir=out_dir / "position", category=None
+    )
+
+    consistency_stats = analyze_cross_layer_consistency(probs=global_logits, top_k=1)
+    save_cross_layer_plots(
+        stats=consistency_stats, out_dir=out_dir / "cross", category=None
     )
 
 

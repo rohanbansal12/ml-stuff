@@ -1,0 +1,7 @@
+metric,value
+num_unique_paths,9936.0
+path_concentration_top20,0.0072
+mean_same_expert_rate,0.01911122165620327
+expected_same_expert_rate,0.016666666666666666
+mean_conditional_entropy,0.6693934798240662
+mean_mutual_info_adjacent,0.3082157373428345

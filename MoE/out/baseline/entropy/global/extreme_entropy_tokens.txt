@@ -111,44 +111,44 @@ LOW ENTROPY TOKENS (Router Confident)
 ============================================================
 
 [1] Entropy: 0.6444
-    Token: ' Dunn' (id=63745)
-    Position: seq=21, pos=8
-    Context:  Winfield Culberson>>> Dunn<<< (born July 1
+    Token: ' the' (id=279)
+    Position: seq=421, pos=8
+    Context:  is taking his date to>>> the<<< movies.  The tickets
 
 [2] Entropy: 0.6457
-    Token: 'bk' (id=40029)
-    Position: seq=7, pos=9
-    Context:  (Persero) T>>>bk<<< (), known as Garuda
+    Token: ' the' (id=279)
+    Position: seq=407, pos=9
+    Context: an is throwing rocks in>>> the<<< river and he notices that
 
 [3] Entropy: 0.6477
-    Token: ' ()' (id=1719)
-    Position: seq=31, pos=5
-    Context: Noah Baumbach>>> ()<<< (born September 3
+    Token: ' the' (id=279)
+    Position: seq=431, pos=5
+    Context: Question: Allison went to>>> the<<< craft store with her friend
 
 [4] Entropy: 0.6493
-    Token: 'ul' (id=360)
-    Position: seq=90, pos=5
-    Context: Sharon Christa McA>>>ul<<<iffe (September 2
+    Token: ' the' (id=279)
+    Position: seq=490, pos=5
+    Context: Question: In preparation for>>> the<<< church fundraiser, Julia b
 
 [5] Entropy: 0.6498
-    Token: ' city' (id=3283)
-    Position: seq=24, pos=4
-    Context: Toledo is a>>> city<<< in Iowa in the United
+    Token: ' a' (id=264)
+    Position: seq=424, pos=4
+    Context: Question: Peter has>>> a<<< plan to take his family
 
 [6] Entropy: 0.6513
-    Token: '3' (id=18)
-    Position: seq=15, pos=3
-    Context: 199>>>3<<< FIFA U-17
+    Token: 'o' (id=78)
+    Position: seq=415, pos=3
+    Context: Question: Nik>>>o<<< has bought 9 pairs
 
 [7] Entropy: 0.6514
-    Token: ' –' (id=1365)
-    Position: seq=38, pos=13
-    Context:  1933>>> –<<< 6 October 2
+    Token: ' the' (id=279)
+    Position: seq=438, pos=13
+    Context: 47 to go to>>> the<<< store. Clare bought 
 
 [8] Entropy: 0.6534
-    Token: 'born' (id=15998)
-    Position: seq=88, pos=5
-    Context: George Richard Chamberlain (>>>born<<< March 31,
+    Token: ' a' (id=264)
+    Position: seq=488, pos=5
+    Context: Question: Pauline has>>> a<<< garden with vegetables. In
 
 [9] Entropy: 0.6538
     Token: ' by' (id=553)
@@ -161,9 +161,9 @@ LOW ENTROPY TOKENS (Router Confident)
     Context: E-text prepared>>> by<<< D Alexander and the Project
 
 [11] Entropy: 0.6540
-    Token: 'in' (id=258)
-    Position: seq=11, pos=5
-    Context: Andriy Voron>>>in<<< (born 21
+    Token: ' a' (id=264)
+    Position: seq=411, pos=5
+    Context: Question: A library has>>> a<<< number of books. 
 
 [12] Entropy: 0.6542
     Token: ' by' (id=553)
@@ -181,19 +181,19 @@ LOW ENTROPY TOKENS (Router Confident)
     Context: E-text prepared>>> by<<< Roger Frank and the Project
 
 [15] Entropy: 0.6545
-    Token: ' Van' (id=12710)
-    Position: seq=22, pos=11
-    Context:  American series created by Chris>>> Van<<< Dusen and produced
+    Token: ' the' (id=279)
+    Position: seq=422, pos=11
+    Context: 572 beans in>>> the<<< jar. One-fourth
 
 [16] Entropy: 0.6546
-    Token: ' como' (id=7953)
-    Position: seq=268, pos=2
-    Context: escribe>>> como<<< iniciarías una conversación
+    Token: 'arm' (id=2178)
+    Position: seq=68, pos=2
+    Context: Bill T>>>arm<<<ey (born William P
 
 [17] Entropy: 0.6565
-    Token: ' are' (id=525)
-    Position: seq=77, pos=4
-    Context: Dead Kennedys>>> are<<< a hardcore punk band from
+    Token: ' her' (id=1059)
+    Position: seq=477, pos=4
+    Context: Question: Erin runs>>> her<<< own launderette and needs
 
 [18] Entropy: 0.6567
     Token: 'f' (id=69)
@@ -201,12 +201,12 @@ LOW ENTROPY TOKENS (Router Confident)
     Context: github.com/stefan>>>f<<<oulis/django-ph
 
 [19] Entropy: 0.6572
-    Token: 'ux' (id=2200)
-    Position: seq=14, pos=13
-    Context: : Impasse des De>>>ux<<< Anges) is a
+    Token: ' at' (id=518)
+    Position: seq=414, pos=13
+    Context:  decided to have dinner together>>> at<<< a nearby restaurant. 
 
 [20] Entropy: 0.6590
-    Token: ' that' (id=429)
-    Position: seq=73, pos=13
-    Context:  the social system or belief>>> that<<< gender is binary and that
+    Token: ' to' (id=311)
+    Position: seq=473, pos=13
+    Context:  he gave six of them>>> to<<< Neil. Now, Henry
 
