@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, List, Tuple, Dict, Generator
 
 
 # =============================================================================
@@ -22,6 +22,7 @@ class GPTConfig:
     dropout: float = 0.1
     rope: bool = True
     rmsnorm: bool = True
+    attn_type: str = "standard"  # "standard", "flash", "flash2", "sdpa"
 
     def __post_init__(self):
         if self.num_kv_heads is None:
@@ -32,61 +33,14 @@ class GPTConfig:
         assert self.d_model % self.num_heads == 0, (
             f"d_model ({self.d_model}) must be divisible by num_heads ({self.num_heads})"
         )
+        assert self.attn_type in ("standard", "flash", "flash2", "sdpa"), (
+            "attn_type must be one of: standard, flash, flash2, sdpa"
+        )
 
     @property
     def d_k(self) -> int:
         return self.d_model // self.num_heads
 
-# =============================================================================
-# Slot Allocator
-# =============================================================================
-
-class SlotAllocator:
-    def __init__(self, num_slots: int):
-        self.num_slots = num_slots
-        self.free_slots = set(range(num_slots))
-        self.active_sequences = {}  # seq_id -> slot_id
-    
-    def allocate(self, seq_id: int) -> Optional[int]:
-        """Allocate a slot for a new sequence. Returns None if full."""
-        if seq_id in self.active_sequences:
-            raise ValueError(f"Sequence {seq_id} already has a slot")
-        if not self.free_slots:
-            return None
-        slot = self.free_slots.pop()
-        self.active_sequences[seq_id] = slot
-        return slot
-    
-    def release(self, seq_id: int):
-        """Release a slot when sequence completes."""
-        if seq_id not in self.active_sequences:
-            raise ValueError(f"Sequence {seq_id} not active")
-        slot = self.active_sequences.pop(seq_id)
-        self.free_slots.add(slot)
-    
-    def get_slot(self, seq_id: int) -> Optional[int]:
-        """Get slot for an active sequence. Returns None if not found."""
-        return self.active_sequences.get(seq_id)
-    
-    def is_full(self) -> bool:
-        return len(self.free_slots) == 0
-    
-    def num_active(self) -> int:
-        return len(self.active_sequences)
-    
-    def num_free(self) -> int:
-        return len(self.free_slots)
-    
-    def get_active_batch_indices(self, device: torch.device) -> torch.Tensor:
-        """Get tensor of active slot indices for batched operations."""
-        slots = list(self.active_sequences.values())
-        return torch.tensor(slots, dtype=torch.long, device=device)
-    
-    def reset(self):
-        """Reset all slots to free."""
-        self.free_slots = set(range(self.num_slots))
-        self.active_sequences.clear()
-    
 
 # =============================================================================
 # KV Cache
@@ -354,12 +308,203 @@ class RoPE(nn.Module):
         return torch.stack((x_rot_even, x_rot_odd), dim=-1).flatten(-2)
 
 
+# =============================================================================
+# Attention Implementations
+# =============================================================================
+
+
+class FlashAttentionNaive(nn.Module):
+    """
+    Naive PyTorch implementation of FlashAttention (v1 algorithm).
+
+    This implements the tiled attention with online softmax for educational purposes.
+    It won't be faster than standard attention due to Python loop overhead,
+    but demonstrates the memory-efficient algorithm.
+    """
+
+    def __init__(self, d_k: int, M: Optional[int] = None, causal: bool = True):
+        super().__init__()
+        self.d_k = d_k
+        self.M = M or 1024 * 64
+        self.B_c = math.ceil(self.M / (4 * self.d_k))
+        self.B_r = min(self.B_c, self.d_k)
+        self.scale = 1.0 / math.sqrt(self.d_k)
+        self.causal = causal
+
+    def forward(
+        self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor
+    ) -> torch.Tensor:
+        b, num_heads, seq_len, d_k = Q.shape
+        O = torch.zeros_like(Q)
+        l = torch.zeros(b, num_heads, seq_len, 1, device=Q.device, dtype=Q.dtype)
+        m = torch.full(
+            (b, num_heads, seq_len, 1), float("-inf"), device=Q.device, dtype=Q.dtype
+        )
+
+        for j in range(0, seq_len, self.B_c):
+            j_end = min(j + self.B_c, seq_len)
+            K_j = K[:, :, j:j_end, :]
+            V_j = V[:, :, j:j_end, :]
+
+            for i in range(0, seq_len, self.B_r):
+                i_end = min(i + self.B_r, seq_len)
+
+                # Skip fully masked blocks for causal attention
+                if self.causal and j > (i_end - 1):
+                    continue
+
+                Q_i = Q[:, :, i:i_end, :]
+                O_i = O[:, :, i:i_end, :]
+                l_i = l[:, :, i:i_end, :]
+                m_i = m[:, :, i:i_end, :]
+
+                S_ij = (Q_i @ K_j.transpose(-1, -2)) * self.scale
+
+                # Apply causal mask within block
+                if self.causal:
+                    q_pos = torch.arange(i, i_end, device=Q.device).unsqueeze(1)
+                    k_pos = torch.arange(j, j_end, device=Q.device).unsqueeze(0)
+                    causal_mask = k_pos > q_pos
+                    S_ij = S_ij.masked_fill(
+                        causal_mask.unsqueeze(0).unsqueeze(0), float("-inf")
+                    )
+
+                m_ij = S_ij.max(dim=-1, keepdim=True).values
+                m_new = torch.maximum(m_i, m_ij)
+
+                P_ij = torch.exp(S_ij - m_new)
+                exp_m_i = torch.exp(m_i - m_new)
+                exp_m_ij = torch.exp(m_ij - m_new)
+
+                l_new = exp_m_i * l_i + P_ij.sum(dim=-1, keepdim=True)
+                O_new = (exp_m_i * l_i * O_i + exp_m_ij * P_ij @ V_j) / l_new
+
+                O[:, :, i:i_end, :] = O_new
+                l[:, :, i:i_end, :] = l_new
+                m[:, :, i:i_end, :] = m_new
+
+        return O
+
+
+class FlashAttention2Naive(nn.Module):
+    """
+    Naive PyTorch implementation of FlashAttention-2 algorithm.
+
+    Key differences from v1:
+    - Outer loop over Q blocks, inner loop over KV blocks (better for causal)
+    - Deferred normalization until after inner loop completes
+    - Returns logsumexp L for potential use in backward pass
+    """
+
+    def __init__(self, d_k: int, M: Optional[int] = None, causal: bool = True):
+        super().__init__()
+        self.d_k = d_k
+        self.M = M or 1024 * 64
+        self.B_c = math.ceil(self.M / (4 * self.d_k))
+        self.B_r = min(self.B_c, self.d_k)
+        self.scale = 1.0 / math.sqrt(self.d_k)
+        self.causal = causal
+
+    def forward(
+        self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        b, num_heads, seq_len, d_k = Q.shape
+        O = torch.zeros_like(Q)
+        L = torch.zeros(b, num_heads, seq_len, 1, device=Q.device, dtype=Q.dtype)
+
+        for i in range(0, seq_len, self.B_r):
+            i_end = min(i + self.B_r, seq_len)
+            Br = i_end - i
+            Q_i = Q[:, :, i:i_end, :]
+
+            O_i = torch.zeros(b, num_heads, Br, d_k, device=Q.device, dtype=Q.dtype)
+            l_i = torch.zeros(b, num_heads, Br, 1, device=Q.device, dtype=Q.dtype)
+            m_i = torch.full(
+                (b, num_heads, Br, 1), float("-inf"), device=Q.device, dtype=Q.dtype
+            )
+
+            j_max = i_end if self.causal else seq_len
+
+            for j in range(0, j_max, self.B_c):
+                j_end = min(j + self.B_c, j_max)
+
+                K_j = K[:, :, j:j_end, :]
+                V_j = V[:, :, j:j_end, :]
+
+                S_ij = (Q_i @ K_j.transpose(-1, -2)) * self.scale
+
+                if self.causal:
+                    q_pos = torch.arange(i, i_end, device=Q.device).unsqueeze(1)
+                    k_pos = torch.arange(j, j_end, device=Q.device).unsqueeze(0)
+                    causal_mask = k_pos > q_pos
+                    S_ij = S_ij.masked_fill(
+                        causal_mask.unsqueeze(0).unsqueeze(0), float("-inf")
+                    )
+
+                m_ij = S_ij.max(dim=-1, keepdim=True).values
+                m_new = torch.maximum(m_i, m_ij)
+
+                P_ij = torch.exp(S_ij - m_new)
+                exp_m = torch.exp(m_i - m_new)
+
+                l_i = exp_m * l_i + P_ij.sum(dim=-1, keepdim=True)
+                O_i = O_i * exp_m + P_ij @ V_j
+
+                m_i = m_new
+
+            O_i = O_i / l_i
+            L_i = m_i + torch.log(l_i)
+
+            O[:, :, i:i_end, :] = O_i
+            L[:, :, i:i_end, :] = L_i
+
+        return O, L
+
+
+def attention_standard(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    mask: torch.Tensor,
+    dropout: nn.Dropout,
+    training: bool,
+) -> torch.Tensor:
+    """Standard scaled dot-product attention."""
+    scale = 1.0 / math.sqrt(Q.size(-1))
+    scores = (Q @ K.transpose(-1, -2)) * scale
+    scores = scores.masked_fill(mask == 0, float("-inf"))
+    attn = F.softmax(scores, dim=-1)
+    if training:
+        attn = dropout(attn)
+    return attn @ V
+
+
+def attention_sdpa(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    is_causal: bool,
+    dropout_p: float,
+    training: bool,
+) -> torch.Tensor:
+    """PyTorch's scaled_dot_product_attention (uses FlashAttention when available)."""
+    return F.scaled_dot_product_attention(
+        Q,
+        K,
+        V,
+        attn_mask=None,
+        dropout_p=dropout_p if training else 0.0,
+        is_causal=is_causal,
+    )
+
+
 class MultiHeadAttention(nn.Module):
     """
     Multi-Head Attention with support for:
     - Grouped Query Attention (GQA) / Multi-Query Attention (MQA)
     - Rotary Position Embeddings (RoPE)
     - KV-Cache for efficient inference
+    - Multiple attention implementations (standard, flash, flash2, sdpa)
     """
 
     def __init__(self, config: GPTConfig, layer_idx: int):
@@ -371,6 +516,8 @@ class MultiHeadAttention(nn.Module):
         self.d_k = config.d_k
         self.d_model = config.d_model
         self.layer_idx = layer_idx
+        self.attn_type = config.attn_type
+        self.dropout_p = config.dropout
 
         # Projections
         self.W_Q = nn.Linear(config.d_model, config.num_heads * self.d_k, bias=False)
@@ -378,7 +525,7 @@ class MultiHeadAttention(nn.Module):
         self.W_V = nn.Linear(config.d_model, config.num_kv_heads * self.d_k, bias=False)
         self.W_O = nn.Linear(config.d_model, config.d_model, bias=False)
 
-        # Causal mask
+        # Causal mask (for standard attention)
         mask = torch.tril(torch.ones(config.max_seq_len, config.max_seq_len))
         self.register_buffer(
             "causal_mask", mask.view(1, 1, config.max_seq_len, config.max_seq_len)
@@ -391,6 +538,14 @@ class MultiHeadAttention(nn.Module):
             self.rope = RoPE(self.d_k, config.max_seq_len)
         else:
             self.rope = None
+
+        # Flash attention modules (naive implementations)
+        if config.attn_type == "flash":
+            self.flash_attn = FlashAttentionNaive(self.d_k, causal=True)
+        elif config.attn_type == "flash2":
+            self.flash_attn = FlashAttention2Naive(self.d_k, causal=True)
+        else:
+            self.flash_attn = None
 
     def expand_kv(self, x: torch.Tensor) -> torch.Tensor:
         """Expand KV heads to match Q heads via repetition."""
@@ -444,25 +599,43 @@ class MultiHeadAttention(nn.Module):
         K_exp = self.expand_kv(K)
         V_exp = self.expand_kv(V)
 
-        # Compute attention scores
+        # Compute attention using selected implementation
         total_kv_len = K_exp.size(2)
-        scores = (Q @ K_exp.transpose(-1, -2)) * (1.0 / math.sqrt(self.d_k))
 
-        # Apply causal mask
-        # Q positions: [position_offset, position_offset + s)
-        # K positions: [0, total_kv_len)
-        mask = self.causal_mask[
-            :, :, position_offset : position_offset + s, :total_kv_len
-        ]
-        scores = scores.masked_fill(mask == 0, float("-inf"))
+        if self.attn_type == "standard":
+            mask = self.causal_mask[
+                :, :, position_offset : position_offset + s, :total_kv_len
+            ]
+            out = attention_standard(Q, K_exp, V_exp, mask, self.dropout, self.training)
 
-        # Softmax and dropout
-        attn = F.softmax(scores, dim=-1)
-        if self.training:
-            attn = self.dropout(attn)
+        elif self.attn_type == "sdpa":
+            # SDPA handles causal masking internally
+            # Note: doesn't support arbitrary position offsets well, best for training
+            out = attention_sdpa(
+                Q,
+                K_exp,
+                V_exp,
+                is_causal=(cache_view is None),
+                dropout_p=self.dropout_p,
+                training=self.training,
+            )
 
-        # Apply attention to values
-        out = attn @ V_exp
+        elif self.attn_type in ("flash", "flash2"):
+            # Naive flash attention implementations
+            # Note: these don't support KV-cache well due to causal mask assumptions
+            if cache_view is not None:
+                # Fall back to standard for cached inference
+                mask = self.causal_mask[
+                    :, :, position_offset : position_offset + s, :total_kv_len
+                ]
+                out = attention_standard(
+                    Q, K_exp, V_exp, mask, self.dropout, self.training
+                )
+            else:
+                result = self.flash_attn(Q, K_exp, V_exp)
+                out = result[0] if isinstance(result, tuple) else result
+        else:
+            raise ValueError(f"Unknown attention type: {self.attn_type}")
 
         # Reshape and project output
         out = out.transpose(1, 2).reshape(b, s, self.d_model)
@@ -757,6 +930,474 @@ class GPT(nn.Module):
 
 
 # =============================================================================
+# Slot Allocator
+# =============================================================================
+
+
+class SlotAllocator:
+    """Manages allocation of cache slots to sequences."""
+
+    def __init__(self, num_slots: int):
+        self.num_slots = num_slots
+        self.free_slots = set(range(num_slots))
+        self.active_sequences = {}  # seq_id -> slot_id
+
+    def allocate(self, seq_id: int) -> Optional[int]:
+        """Allocate a slot for a new sequence. Returns None if full."""
+        if seq_id in self.active_sequences:
+            raise ValueError(f"Sequence {seq_id} already has a slot")
+        if not self.free_slots:
+            return None
+        slot = self.free_slots.pop()
+        self.active_sequences[seq_id] = slot
+        return slot
+
+    def release(self, seq_id: int):
+        """Release a slot when sequence completes."""
+        if seq_id not in self.active_sequences:
+            raise ValueError(f"Sequence {seq_id} not active")
+        slot = self.active_sequences.pop(seq_id)
+        self.free_slots.add(slot)
+
+    def get_slot(self, seq_id: int) -> Optional[int]:
+        """Get slot for an active sequence. Returns None if not found."""
+        return self.active_sequences.get(seq_id)
+
+    def is_full(self) -> bool:
+        return len(self.free_slots) == 0
+
+    def num_active(self) -> int:
+        return len(self.active_sequences)
+
+    def num_free(self) -> int:
+        return len(self.free_slots)
+
+    def get_active_slots(self) -> List[int]:
+        """Get list of active slot IDs."""
+        return list(self.active_sequences.values())
+
+    def get_active_seq_ids(self) -> List[int]:
+        """Get list of active sequence IDs."""
+        return list(self.active_sequences.keys())
+
+    def reset(self):
+        """Reset all slots to free."""
+        self.free_slots = set(range(self.num_slots))
+        self.active_sequences.clear()
+
+
+# =============================================================================
+# Sequence State
+# =============================================================================
+
+
+@dataclass
+class SequenceState:
+    """Tracks the state of an active sequence."""
+
+    seq_id: int
+    slot_id: int
+    prompt_tokens: List[int]
+    generated_tokens: List[int]
+    max_new_tokens: int
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 0.0
+    stop_token_ids: Optional[List[int]] = None
+
+    @property
+    def current_len(self) -> int:
+        """Total length of prompt + generated tokens."""
+        return len(self.prompt_tokens) + len(self.generated_tokens)
+
+    @property
+    def num_generated(self) -> int:
+        return len(self.generated_tokens)
+
+    def is_complete(self) -> bool:
+        """Check if generation should stop."""
+        if self.num_generated >= self.max_new_tokens:
+            return True
+        if self.stop_token_ids and self.generated_tokens:
+            if self.generated_tokens[-1] in self.stop_token_ids:
+                return True
+        return False
+
+
+# =============================================================================
+# Generation Engine
+# =============================================================================
+
+
+class GenerationEngine:
+    """
+    Continuous batching generation engine.
+
+    Handles dynamic batching where sequences can enter and exit the batch
+    at any time, maximizing GPU utilization.
+
+    Usage:
+        engine = GenerationEngine(model, max_batch=8, max_seq_len=1024)
+
+        # Add requests
+        seq_id_1 = engine.add_request(prompt_tokens_1, max_new_tokens=100)
+        seq_id_2 = engine.add_request(prompt_tokens_2, max_new_tokens=50)
+
+        # Generate (yields tokens as they're produced)
+        for seq_id, token in engine.run():
+            print(f"Sequence {seq_id}: token {token}")
+
+        # Or step manually
+        while engine.has_work():
+            results = engine.step()
+            for seq_id, token in results.items():
+                process_token(seq_id, token)
+    """
+
+    def __init__(
+        self,
+        model: GPT,
+        max_batch: int,
+        max_seq_len: Optional[int] = None,
+        device: Optional[torch.device] = None,
+    ):
+        self.model = model
+        self.model.eval()
+        self.config = model.config
+        self.max_batch = max_batch
+        self.max_seq_len = max_seq_len or self.config.max_seq_len
+        self.device = device or next(model.parameters()).device
+        self.dtype = next(model.parameters()).dtype
+
+        # Pre-allocate KV cache
+        self.cache = KVCache(
+            max_batch=max_batch,
+            max_seq_len=self.max_seq_len,
+            num_layers=self.config.num_layers,
+            num_kv_heads=self.config.num_kv_heads,
+            d_k=self.config.d_k,
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        # Slot management
+        self.slots = SlotAllocator(max_batch)
+
+        # Sequence tracking
+        self.pending_requests: List[
+            Tuple[int, List[int], int, float, int, float, Optional[List[int]]]
+        ] = []
+        self.active_sequences: Dict[int, SequenceState] = {}
+        self.completed_sequences: Dict[int, SequenceState] = {}
+
+        # ID counter
+        self._next_seq_id = 0
+
+    def add_request(
+        self,
+        prompt_tokens: List[int],
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        stop_token_ids: Optional[List[int]] = None,
+    ) -> int:
+        """
+        Add a generation request.
+
+        Args:
+            prompt_tokens: List of token IDs for the prompt
+            max_new_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            top_k: Top-k filtering (0 to disable)
+            top_p: Top-p nucleus filtering (0.0 to disable)
+            stop_token_ids: Token IDs that stop generation
+
+        Returns:
+            seq_id: Unique identifier for this request
+        """
+        seq_id = self._next_seq_id
+        self._next_seq_id += 1
+
+        # Add to pending queue
+        self.pending_requests.append(
+            (
+                seq_id,
+                prompt_tokens,
+                max_new_tokens,
+                temperature,
+                top_k,
+                top_p,
+                stop_token_ids,
+            )
+        )
+
+        return seq_id
+
+    def _schedule_pending(self):
+        """Move pending requests to active if slots available."""
+        while self.pending_requests and not self.slots.is_full():
+            seq_id, prompt_tokens, max_new_tokens, temp, top_k, top_p, stop_ids = (
+                self.pending_requests.pop(0)
+            )
+
+            # Allocate slot
+            slot_id = self.slots.allocate(seq_id)
+            if slot_id is None:
+                # Put it back (shouldn't happen due to is_full check)
+                self.pending_requests.insert(
+                    0,
+                    (
+                        seq_id,
+                        prompt_tokens,
+                        max_new_tokens,
+                        temp,
+                        top_k,
+                        top_p,
+                        stop_ids,
+                    ),
+                )
+                break
+
+            # Create sequence state
+            self.active_sequences[seq_id] = SequenceState(
+                seq_id=seq_id,
+                slot_id=slot_id,
+                prompt_tokens=prompt_tokens,
+                generated_tokens=[],
+                max_new_tokens=max_new_tokens,
+                temperature=temp,
+                top_k=top_k,
+                top_p=top_p,
+                stop_token_ids=stop_ids,
+            )
+
+    def _prefill_new_sequences(self) -> Dict[int, int]:
+        """
+        Process prompts for newly scheduled sequences.
+
+        Returns:
+            Dict mapping seq_id -> first generated token
+        """
+        results = {}
+
+        # Find sequences that need prefill (no generated tokens yet)
+        to_prefill = [
+            seq for seq in self.active_sequences.values() if seq.num_generated == 0
+        ]
+
+        if not to_prefill:
+            return results
+
+        # Process each prefill individually (they have different lengths)
+        # In production, you'd want to batch prefills of similar length
+        for seq in to_prefill:
+            slot_idx = torch.tensor([seq.slot_id], device=self.device)
+            prompt = torch.tensor([seq.prompt_tokens], device=self.device)
+
+            # Forward pass
+            cache_view = KVCacheView(self.cache, slot_idx)
+            with torch.no_grad():
+                logits = self.model(prompt, cache_view=cache_view)
+            cache_view.finalize(len(seq.prompt_tokens))
+
+            # Sample token
+            next_token = self._sample_token(
+                logits[0, -1, :], seq.temperature, seq.top_k, seq.top_p
+            )
+
+            seq.generated_tokens.append(next_token)
+            results[seq.seq_id] = next_token
+
+        return results
+
+    def _decode_step(self) -> Dict[int, int]:
+        """
+        Run one decode step for all active sequences that have started generating.
+
+        Returns:
+            Dict mapping seq_id -> generated token
+        """
+        results = {}
+
+        # Find sequences in decode phase (have generated at least one token)
+        decoding = [
+            seq
+            for seq in self.active_sequences.values()
+            if seq.num_generated > 0 and not seq.is_complete()
+        ]
+
+        if not decoding:
+            return results
+
+        # Batch decode - all sequences process one token
+        batch_size = len(decoding)
+        slot_indices = torch.tensor(
+            [seq.slot_id for seq in decoding], device=self.device
+        )
+
+        # Get last token for each sequence
+        last_tokens = torch.tensor(
+            [[seq.generated_tokens[-1]] for seq in decoding], device=self.device
+        )
+
+        # Forward pass
+        cache_view = KVCacheView(self.cache, slot_indices)
+        with torch.no_grad():
+            logits = self.model(last_tokens, cache_view=cache_view)
+        cache_view.finalize(1)
+
+        # Sample tokens for each sequence
+        for i, seq in enumerate(decoding):
+            next_token = self._sample_token(
+                logits[i, -1, :], seq.temperature, seq.top_k, seq.top_p
+            )
+            seq.generated_tokens.append(next_token)
+            results[seq.seq_id] = next_token
+
+        return results
+
+    def _sample_token(
+        self, logits: torch.Tensor, temperature: float, top_k: int, top_p: float
+    ) -> int:
+        """Sample a single token from logits."""
+        logits = logits / max(temperature, 1e-8)
+
+        if top_k > 0 or top_p > 0.0:
+            logits = GPT.top_p_top_k(logits.unsqueeze(0), top_p, top_k).squeeze(0)
+
+        probs = F.softmax(logits, dim=-1)
+        token = torch.multinomial(probs, num_samples=1).item()
+        return token
+
+    def _retire_completed(self) -> List[int]:
+        """
+        Move completed sequences out of active set.
+
+        Returns:
+            List of completed seq_ids
+        """
+        completed = []
+
+        for seq_id, seq in list(self.active_sequences.items()):
+            if seq.is_complete():
+                # Release slot
+                self.slots.release(seq_id)
+                self.cache.reset(torch.tensor([seq.slot_id], device=self.device))
+
+                # Move to completed
+                self.completed_sequences[seq_id] = seq
+                del self.active_sequences[seq_id]
+                completed.append(seq_id)
+
+        return completed
+
+    def step(self) -> Dict[int, Optional[int]]:
+        """
+        Run one generation step.
+
+        Returns:
+            Dict mapping seq_id -> token (None if sequence completed this step)
+        """
+        results = {}
+
+        # 1. Schedule pending requests into free slots
+        self._schedule_pending()
+
+        # 2. Prefill new sequences
+        prefill_results = self._prefill_new_sequences()
+        results.update(prefill_results)
+
+        # 3. Decode step for active sequences
+        decode_results = self._decode_step()
+        results.update(decode_results)
+
+        # 4. Retire completed sequences
+        completed = self._retire_completed()
+        for seq_id in completed:
+            if seq_id not in results:
+                results[seq_id] = None
+
+        return results
+
+    def has_work(self) -> bool:
+        """Check if there's more work to do."""
+        return bool(self.pending_requests) or bool(self.active_sequences)
+
+    def run(self) -> Generator[Tuple[int, int], None, None]:
+        """
+        Run generation to completion, yielding tokens as produced.
+
+        Yields:
+            (seq_id, token) tuples as tokens are generated
+        """
+        while self.has_work():
+            results = self.step()
+            for seq_id, token in results.items():
+                if token is not None:
+                    yield seq_id, token
+
+    def get_sequence(self, seq_id: int) -> Optional[SequenceState]:
+        """Get sequence state by ID."""
+        if seq_id in self.active_sequences:
+            return self.active_sequences[seq_id]
+        return self.completed_sequences.get(seq_id)
+
+    def get_generated_tokens(self, seq_id: int) -> Optional[List[int]]:
+        """Get generated tokens for a sequence."""
+        seq = self.get_sequence(seq_id)
+        return seq.generated_tokens if seq else None
+
+    def get_full_sequence(self, seq_id: int) -> Optional[List[int]]:
+        """Get prompt + generated tokens for a sequence."""
+        seq = self.get_sequence(seq_id)
+        if seq is None:
+            return None
+        return seq.prompt_tokens + seq.generated_tokens
+
+    def cancel(self, seq_id: int) -> bool:
+        """
+        Cancel an active or pending sequence.
+
+        Returns:
+            True if cancelled, False if not found
+        """
+        # Check pending
+        for i, (sid, *_) in enumerate(self.pending_requests):
+            if sid == seq_id:
+                self.pending_requests.pop(i)
+                return True
+
+        # Check active
+        if seq_id in self.active_sequences:
+            seq = self.active_sequences[seq_id]
+            self.slots.release(seq_id)
+            self.cache.reset(torch.tensor([seq.slot_id], device=self.device))
+            del self.active_sequences[seq_id]
+            return True
+
+        return False
+
+    def reset(self):
+        """Reset engine state for reuse."""
+        self.slots.reset()
+        self.cache.reset_all()
+        self.pending_requests.clear()
+        self.active_sequences.clear()
+        self.completed_sequences.clear()
+
+    def stats(self) -> Dict[str, int]:
+        """Get engine statistics."""
+        return {
+            "pending": len(self.pending_requests),
+            "active": len(self.active_sequences),
+            "completed": len(self.completed_sequences),
+            "slots_free": self.slots.num_free(),
+            "slots_active": self.slots.num_active(),
+        }
+
+
+# =============================================================================
 # Convenience Functions
 # =============================================================================
 
@@ -771,6 +1412,7 @@ def create_model(
     dropout: float = 0.1,
     rope: bool = True,
     rmsnorm: bool = True,
+    attn_type: str = "standard",
 ) -> GPT:
     """Convenience function to create a GPT model."""
     config = GPTConfig(
@@ -783,5 +1425,6 @@ def create_model(
         dropout=dropout,
         rope=rope,
         rmsnorm=rmsnorm,
+        attn_type=attn_type,
     )
     return GPT(config)
