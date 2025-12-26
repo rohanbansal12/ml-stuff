@@ -19,6 +19,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 
 from model import GPT, GPTConfig, GenerationEngine
+from diagnostics import TrainingDiagnostics, detect_anomalies
 
 
 @dataclass
@@ -335,7 +336,20 @@ def train_one_epoch(
     epoch,
     log_interval=100,
     metrics: Optional[ProfilingMetrics] = None,
+    use_amp: bool = False,
+    grad_accum_steps: int = 1,
+    diagnostics: Optional[TrainingDiagnostics] = None,
+    diagnostics_interval: int = 500,
 ):
+    """
+    Train for one epoch with optional gradient accumulation.
+
+    Args:
+        grad_accum_steps: Number of mini-batches to accumulate before optimizer step.
+                         Effective batch size = batch_size * grad_accum_steps
+        diagnostics: Optional TrainingDiagnostics instance for detailed logging
+        diagnostics_interval: How often to log detailed diagnostics (in optimizer steps)
+    """
     model.train()
     total_loss = 0.0
     total_tokens = 0
@@ -346,48 +360,82 @@ def train_one_epoch(
 
     timer = Timer(device)
 
+    # Track accumulated values
+    accum_loss = 0.0
+    accum_tokens = 0
+    optimizer.zero_grad()
+
     for step, (x, y) in enumerate(train_loader):
         step_start = time.perf_counter()
 
         x, y = x.to(device), y.to(device)
         batch_tokens = y.numel()
 
-        # Forward pass timing
+        # Forward pass (with optional bfloat16 autocast)
         with timer:
-            optimizer.zero_grad()
-            logits = model(x)  # No cache during training
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            with torch.amp.autocast(
+                device_type=device.type, dtype=torch.bfloat16, enabled=use_amp
+            ):
+                logits = model(x)
+                # Scale loss by accumulation steps for correct gradient magnitude
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                scaled_loss = loss / grad_accum_steps
         forward_ms = timer.elapsed_ms
 
-        # Backward pass timing
+        # Backward pass (accumulates gradients)
         with timer:
-            loss.backward()
+            scaled_loss.backward()
         backward_ms = timer.elapsed_ms
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-        # Optimizer step timing
-        with timer:
-            optimizer.step()
-            scheduler.step()
-        optimizer_ms = timer.elapsed_ms
-
-        # Update metrics
-        step_time_ms = (time.perf_counter() - step_start) * 1000
-        tokens_per_sec = batch_tokens / (step_time_ms / 1000)
-
-        metrics.update_ema("ema_step_time_ms", step_time_ms)
-        metrics.update_ema("ema_tokens_per_sec", tokens_per_sec)
-        metrics.update_ema("ema_forward_ms", forward_ms)
-        metrics.update_ema("ema_backward_ms", backward_ms)
-        metrics.update_ema("ema_optimizer_ms", optimizer_ms)
-        metrics.update_memory()
-        metrics.tokens_seen += batch_tokens
-
+        # Track loss and tokens (use unscaled loss for logging)
+        accum_loss += loss.item() * batch_tokens
+        accum_tokens += batch_tokens
         total_loss += loss.item() * batch_tokens
         total_tokens += batch_tokens
 
-        global_step = epoch * len(train_loader) + step
+        # Only step optimizer every grad_accum_steps
+        is_accumulation_step = (step + 1) % grad_accum_steps == 0
+        is_last_step = (step + 1) == len(train_loader)
+
+        if is_accumulation_step or is_last_step:
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+            # Optimizer step
+            with timer:
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+            optimizer_ms = timer.elapsed_ms
+
+            # Calculate effective batch metrics
+            step_time_ms = (time.perf_counter() - step_start) * 1000
+            # For accumulated steps, we count all tokens in the accumulation window
+            tokens_per_sec = (
+                accum_tokens / (step_time_ms / 1000)
+                if is_accumulation_step
+                else batch_tokens / (step_time_ms / 1000)
+            )
+
+            metrics.update_ema("ema_step_time_ms", step_time_ms)
+            metrics.update_ema("ema_tokens_per_sec", tokens_per_sec)
+            metrics.update_ema("ema_forward_ms", forward_ms)
+            metrics.update_ema("ema_backward_ms", backward_ms)
+            metrics.update_ema("ema_optimizer_ms", optimizer_ms)
+            metrics.update_memory()
+            metrics.tokens_seen += accum_tokens
+
+            # Reset accumulation tracking
+            accum_loss = 0.0
+            accum_tokens = 0
+        else:
+            # No optimizer step, minimal timing update
+            optimizer_ms = 0.0
+            grad_norm = 0.0
+
+        # Global step counts actual optimizer updates
+        optimizer_step = epoch * (len(train_loader) // grad_accum_steps) + (
+            step // grad_accum_steps
+        )
 
         if (step + 1) % log_interval == 0:
             elapsed = time.time() - epoch_start_time
@@ -402,57 +450,71 @@ def train_one_epoch(
             )
 
             # Loss metrics
-            writer.add_scalar("train/loss", loss.item(), global_step)
-            writer.add_scalar("train/avg_loss", avg_loss, global_step)
+            writer.add_scalar("train/loss", loss.item(), optimizer_step)
+            writer.add_scalar("train/avg_loss", avg_loss, optimizer_step)
             writer.add_scalar(
-                "train/perplexity", math.exp(min(loss.item(), 20)), global_step
+                "train/perplexity", math.exp(min(loss.item(), 20)), optimizer_step
             )
-            writer.add_scalar("train/grad_norm", grad_norm, global_step)
-            writer.add_scalar("train/learning_rate", current_lr, global_step)
+            writer.add_scalar("train/grad_norm", grad_norm, optimizer_step)
+            writer.add_scalar("train/learning_rate", current_lr, optimizer_step)
 
             # Throughput metrics
             writer.add_scalar(
-                "perf/tokens_per_sec", metrics.ema_tokens_per_sec, global_step
+                "perf/tokens_per_sec", metrics.ema_tokens_per_sec, optimizer_step
             )
             writer.add_scalar(
-                "perf/step_time_ms", metrics.ema_step_time_ms, global_step
+                "perf/step_time_ms", metrics.ema_step_time_ms, optimizer_step
             )
-            writer.add_scalar("perf/forward_ms", metrics.ema_forward_ms, global_step)
-            writer.add_scalar("perf/backward_ms", metrics.ema_backward_ms, global_step)
+            writer.add_scalar("perf/forward_ms", metrics.ema_forward_ms, optimizer_step)
             writer.add_scalar(
-                "perf/optimizer_ms", metrics.ema_optimizer_ms, global_step
+                "perf/backward_ms", metrics.ema_backward_ms, optimizer_step
+            )
+            writer.add_scalar(
+                "perf/optimizer_ms", metrics.ema_optimizer_ms, optimizer_step
             )
 
             # Memory metrics
             writer.add_scalar(
-                "memory/peak_reserved_mb", metrics.peak_memory_mb, global_step
+                "memory/peak_reserved_mb", metrics.peak_memory_mb, optimizer_step
             )
             writer.add_scalar(
                 "memory/peak_allocated_mb",
                 metrics.peak_memory_allocated_mb,
-                global_step,
+                optimizer_step,
             )
 
             if torch.cuda.is_available():
                 current_mem = torch.cuda.memory_allocated() / 1024 / 1024
                 writer.add_scalar(
-                    "memory/current_allocated_mb", current_mem, global_step
+                    "memory/current_allocated_mb", current_mem, optimizer_step
                 )
+
+            # Detailed diagnostics (less frequent)
+            if diagnostics is not None and optimizer_step % diagnostics_interval == 0:
+                diagnostics.log_all(writer, optimizer_step, current_lr)
+
+                # Check for anomalies
+                warnings = detect_anomalies(loss.item(), grad_norm)
+                for warning in warnings:
+                    print(f"  [{warning}]")
 
     epoch_loss = total_loss / total_tokens
     return epoch_loss, metrics
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, device):
+def evaluate(model, val_loader, device, use_amp: bool = False):
     model.eval()
     total_loss = 0.0
     total_tokens = 0
 
     for x, y in val_loader:
         x, y = x.to(device), y.to(device)
-        logits = model(x)  # No cache during evaluation
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        with torch.amp.autocast(
+            device_type=device.type, dtype=torch.bfloat16, enabled=use_amp
+        ):
+            logits = model(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
         total_loss += loss.item() * y.numel()
         total_tokens += y.numel()
 
@@ -588,7 +650,7 @@ def main():
     parser.add_argument(
         "--attn_type",
         type=str,
-        default="standard",
+        default="sdpa",
         choices=["standard", "flash", "flash2", "sdpa"],
         help="Attention implementation to use",
     )
@@ -596,6 +658,12 @@ def main():
     # Training
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument(
+        "--grad_accum_steps",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps. Effective batch = batch_size * grad_accum_steps",
+    )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=0.1)
     parser.add_argument("--warmup_ratio", type=float, default=0.05)
@@ -612,8 +680,15 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.8)
 
     # Misc
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
+
+    # Mixed Precision
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="Use automatic mixed precision (bfloat16 if supported, else disabled)",
+    )
 
     # Profiling
     parser.add_argument(
@@ -628,6 +703,29 @@ def main():
         "--benchmark_generation",
         action="store_true",
         help="Run generation benchmark at end of training",
+    )
+
+    # Diagnostics
+    parser.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help="Enable detailed training diagnostics (gradients, weights, etc.)",
+    )
+    parser.add_argument(
+        "--diagnostics_interval",
+        type=int,
+        default=500,
+        help="How often to log detailed diagnostics (in optimizer steps)",
+    )
+    parser.add_argument(
+        "--log_histograms",
+        action="store_true",
+        help="Log weight/gradient histograms (expensive, use sparingly)",
+    )
+    parser.add_argument(
+        "--track_activations",
+        action="store_true",
+        help="Track activation statistics (adds forward hooks)",
     )
 
     args = parser.parse_args()
@@ -668,9 +766,15 @@ def main():
         pin_memory=True,
     )
 
+    # Calculate effective batch size
+    effective_batch_size = args.batch_size * args.grad_accum_steps
+
     print(f"Train sequences: {len(train_dataset):,}")
     print(f"Val sequences: {len(val_dataset):,}")
     print(f"Steps per epoch: {len(train_loader):,}")
+    print(
+        f"Batch size: {args.batch_size} x {args.grad_accum_steps} accumulation = {effective_batch_size} effective"
+    )
 
     # Model
     config = GPTConfig(
@@ -699,14 +803,15 @@ def main():
         weight_decay=args.weight_decay,
     )
 
-    total_steps = len(train_loader) * args.epochs
+    # Total optimizer steps (not mini-batch steps)
+    total_steps = (len(train_loader) // args.grad_accum_steps) * args.epochs
     warmup_steps = int(total_steps * args.warmup_ratio)
 
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, warmup_steps, total_steps, args.min_lr_ratio
     )
 
-    print(f"Total steps: {total_steps:,}, Warmup steps: {warmup_steps:,}")
+    print(f"Total optimizer steps: {total_steps:,}, Warmup steps: {warmup_steps:,}")
 
     # Logging setup
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -717,6 +822,7 @@ def main():
     # Log hyperparameters
     hparams = vars(args)
     hparams["num_params"] = num_params
+    hparams["effective_batch_size"] = effective_batch_size
     writer.add_text("hparams", str(hparams))
 
     # Sample prompts for generation (TinyStories style)
@@ -748,9 +854,36 @@ def main():
         print("\nProfiling complete. Exiting.")
         return
 
+    # Setup mixed precision training (bfloat16 only, disabled if not supported)
+    use_amp = False
+    if args.amp:
+        if not torch.cuda.is_available():
+            print("WARNING: AMP requested but CUDA not available, using fp32")
+        elif not torch.cuda.is_bf16_supported():
+            print(
+                "WARNING: AMP requested but bfloat16 not supported on this GPU, using fp32"
+            )
+        else:
+            use_amp = True
+            print("Mixed precision enabled (bfloat16)")
+
     # Reset memory stats for training
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
+
+    # Setup diagnostics
+    diagnostics = None
+    if args.diagnostics:
+        diagnostics = TrainingDiagnostics(
+            model,
+            log_histograms=args.log_histograms,
+            track_activations=args.track_activations,
+        )
+        print(f"Diagnostics enabled (interval: {args.diagnostics_interval} steps)")
+        if args.log_histograms:
+            print("  - Histogram logging enabled (may slow down training)")
+        if args.track_activations:
+            print("  - Activation tracking enabled")
 
     # Training loop
     best_val_loss = float("inf")
@@ -762,23 +895,27 @@ def main():
         print(f"{'=' * 60}")
 
         train_loss, metrics = train_one_epoch(
-            model,
-            train_loader,
-            optimizer,
-            scheduler,
-            device,
-            writer,
-            epoch,
-            args.log_interval,
-            metrics,
+            model=model,
+            train_loader=train_loader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=device,
+            writer=writer,
+            epoch=epoch,
+            log_interval=args.log_interval,
+            metrics=metrics,
+            use_amp=use_amp,
+            grad_accum_steps=args.grad_accum_steps,
+            diagnostics=diagnostics,
+            diagnostics_interval=args.diagnostics_interval,
         )
 
-        val_loss = evaluate(model, val_loader, device)
+        val_loss = evaluate(model, val_loader, device, use_amp=use_amp)
 
         train_ppl = math.exp(train_loss)
         val_ppl = math.exp(val_loss)
 
-        global_step = (epoch + 1) * len(train_loader)
+        global_step = (epoch + 1) * (len(train_loader) // args.grad_accum_steps)
         writer.add_scalar("epoch/train_loss", train_loss, epoch)
         writer.add_scalar("epoch/val_loss", val_loss, epoch)
         writer.add_scalar("epoch/train_ppl", train_ppl, epoch)
@@ -791,10 +928,10 @@ def main():
         # Generate samples
         if (epoch + 1) % args.sample_interval == 0:
             generations = sample_text(
-                model,
-                tokenizer,
-                device,
-                sample_prompts,
+                model=model,
+                tokenizer=tokenizer,
+                device=device,
+                prompts=sample_prompts,
                 max_new_tokens=100,
                 temperature=args.temperature,
                 top_k=50,
@@ -829,6 +966,11 @@ def main():
             print(f"  New best model saved! (val_loss: {val_loss:.4f})")
 
     writer.close()
+
+    # Cleanup diagnostics hooks
+    if diagnostics is not None:
+        diagnostics.remove_hooks()
+
     print_memory_summary(device, "(end of training)")
     print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
 
