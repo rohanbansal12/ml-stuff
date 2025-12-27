@@ -521,10 +521,23 @@ def evaluate(model, val_loader, device, use_amp: bool = False):
     return total_loss / total_tokens
 
 
+# =============================================================================
+# Learning Rate Schedulers
+# =============================================================================
+
+
 def get_cosine_schedule_with_warmup(
     optimizer, warmup_steps, total_steps, min_lr_ratio=0.1
 ):
-    """Cosine decay with linear warmup."""
+    """
+    Cosine decay with linear warmup.
+
+    LR curve:
+    - Warmup: Linear 0 → base_lr
+    - Decay: Cosine base_lr → min_lr
+
+    Most common schedule for LLM training.
+    """
 
     def lr_lambda(step):
         if step < warmup_steps:
@@ -535,6 +548,163 @@ def get_cosine_schedule_with_warmup(
         )
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def get_linear_schedule_with_warmup(
+    optimizer, warmup_steps, total_steps, min_lr_ratio=0.1
+):
+    """
+    Linear decay with linear warmup.
+
+    LR curve:
+    - Warmup: Linear 0 → base_lr
+    - Decay: Linear base_lr → min_lr
+
+    Simpler alternative to cosine, sometimes works just as well.
+    """
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / warmup_steps
+        progress = (step - warmup_steps) / (total_steps - warmup_steps)
+        return min_lr_ratio + (1 - min_lr_ratio) * (1 - progress)
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def get_wsd_schedule(
+    optimizer, warmup_steps, total_steps, stable_ratio=0.8, min_lr_ratio=0.1
+):
+    """
+    Warmup-Stable-Decay (WSD) schedule.
+
+    LR curve:
+    - Warmup: Linear 0 → base_lr
+    - Stable: Constant base_lr (for stable_ratio of remaining steps)
+    - Decay: Cosine base_lr → min_lr
+
+    Used by some large-scale training runs. The stable phase allows
+    the model to train at peak LR longer before decay.
+
+    Args:
+        stable_ratio: Fraction of post-warmup steps to stay at peak LR
+    """
+    post_warmup_steps = total_steps - warmup_steps
+    stable_steps = int(post_warmup_steps * stable_ratio)
+    decay_steps = post_warmup_steps - stable_steps
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            # Warmup phase
+            return step / warmup_steps
+
+        step_after_warmup = step - warmup_steps
+
+        if step_after_warmup < stable_steps:
+            # Stable phase
+            return 1.0
+
+        # Decay phase
+        decay_progress = (step_after_warmup - stable_steps) / decay_steps
+        return min_lr_ratio + (1 - min_lr_ratio) * 0.5 * (
+            1 + math.cos(math.pi * decay_progress)
+        )
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def get_inverse_sqrt_schedule(
+    optimizer, warmup_steps, total_steps=None, min_lr_ratio=0.1
+):
+    """
+    Inverse square root schedule with linear warmup.
+
+    LR curve:
+    - Warmup: Linear 0 → base_lr
+    - Decay: base_lr * sqrt(warmup_steps / step)
+
+    Original Transformer schedule ("Attention is All You Need").
+    Decays slowly, good for long training runs.
+
+    Note: total_steps is unused but accepted for API compatibility.
+    """
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / warmup_steps
+
+        # Inverse sqrt decay
+        decay = math.sqrt(warmup_steps / step)
+        return max(decay, min_lr_ratio)
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def get_constant_schedule_with_warmup(
+    optimizer, warmup_steps, total_steps=None, min_lr_ratio=None
+):
+    """
+    Constant LR with linear warmup.
+
+    LR curve:
+    - Warmup: Linear 0 → base_lr
+    - After: Constant base_lr
+
+    Useful as a baseline or for short experiments.
+
+    Note: total_steps and min_lr_ratio unused but accepted for API compatibility.
+    """
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / warmup_steps
+        return 1.0
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def get_scheduler(
+    name: str,
+    optimizer,
+    warmup_steps: int,
+    total_steps: int,
+    min_lr_ratio: float = 0.1,
+    **kwargs,
+):
+    """
+    Factory function to create a scheduler by name.
+
+    Args:
+        name: One of 'cosine', 'linear', 'wsd', 'invsqrt', 'constant'
+        optimizer: The optimizer to schedule
+        warmup_steps: Number of warmup steps
+        total_steps: Total training steps
+        min_lr_ratio: Minimum LR as fraction of base LR
+        **kwargs: Additional arguments passed to specific schedulers
+
+    Returns:
+        LR scheduler
+    """
+    schedulers = {
+        "cosine": get_cosine_schedule_with_warmup,
+        "linear": get_linear_schedule_with_warmup,
+        "wsd": get_wsd_schedule,
+        "invsqrt": get_inverse_sqrt_schedule,
+        "constant": get_constant_schedule_with_warmup,
+    }
+
+    if name not in schedulers:
+        raise ValueError(
+            f"Unknown scheduler: {name}. Choose from: {list(schedulers.keys())}"
+        )
+
+    return schedulers[name](
+        optimizer=optimizer,
+        warmup_steps=warmup_steps,
+        total_steps=total_steps,
+        min_lr_ratio=min_lr_ratio,
+        **kwargs,
+    )
 
 
 def run_profiler(
@@ -668,6 +838,13 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=0.1)
     parser.add_argument("--warmup_ratio", type=float, default=0.05)
     parser.add_argument("--min_lr_ratio", type=float, default=0.1)
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        default="cosine",
+        choices=["cosine", "linear", "wsd", "invsqrt", "constant"],
+        help="Learning rate scheduler type",
+    )
 
     # Logging
     parser.add_argument("--log_interval", type=int, default=100)
@@ -807,11 +984,16 @@ def main():
     total_steps = (len(train_loader) // args.grad_accum_steps) * args.epochs
     warmup_steps = int(total_steps * args.warmup_ratio)
 
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer, warmup_steps, total_steps, args.min_lr_ratio
+    scheduler = get_scheduler(
+        name=args.scheduler,
+        optimizer=optimizer,
+        warmup_steps=warmup_steps,
+        total_steps=total_steps,
+        min_lr_ratio=args.min_lr_ratio,
     )
 
     print(f"Total optimizer steps: {total_steps:,}, Warmup steps: {warmup_steps:,}")
+    print(f"Scheduler: {args.scheduler}")
 
     # Logging setup
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")

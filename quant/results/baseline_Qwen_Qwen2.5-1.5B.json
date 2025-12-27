@@ -1,0 +1,19 @@
+{
+  "model": "Qwen/Qwen2.5-1.5B",
+  "quantization": "none (FP16 baseline)",
+  "timestamp": "2025-12-27T06:16:27.260222",
+  "config": {
+    "hellaswag_n": 500,
+    "wikitext_tokens": 4096,
+    "device": "cuda:0",
+    "dtype": "torch.float16"
+  },
+  "metrics": {
+    "hellaswag_accuracy": 0.546,
+    "hellaswag_correct": 273,
+    "hellaswag_total": 500,
+    "wikitext_perplexity": 8.07194995880127,
+    "wikitext_avg_loss": 2.088395118713379,
+    "wikitext_tokens_scored": 4096
+  }
+}
