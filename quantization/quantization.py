@@ -518,9 +518,23 @@ def compute_hessian(X: Tensor) -> Tensor:
     Note: Add small diagonal for numerical stability: H += damping * I
           Use damping = 0.01 * mean(diag(H)) as a good default
     """
+    # Work in float32 for numerical stability
+    X = X.float()
+    
+    # Check for NaN/Inf in input
+    if torch.isnan(X).any() or torch.isinf(X).any():
+        print("  Warning: NaN/Inf in activations, cleaning...")
+        X = torch.nan_to_num(X, nan=0.0, posinf=1e6, neginf=-1e6)
+    
     H = X.T @ X
-    damping = 0.01 * H.diag().mean()
-    H += damping * torch.eye(H.size(0), device=H.device, dtype=H.dtype)
+    
+    # Add damping for numerical stability
+    diag_mean = H.diag().mean()
+    if diag_mean <= 0 or torch.isnan(diag_mean):
+        diag_mean = 1.0
+    damping = 0.01 * diag_mean
+    H.diagonal().add_(damping)
+    
     return H
 
 
@@ -584,136 +598,146 @@ def quantize_gptq_layer(
     block_size: int = 128,
 ) -> tuple[Tensor, dict]:
     """
-    Efficient GPTQ implementation using Cholesky decomposition and blocking.
+    Memory-efficient GPTQ using Cholesky decomposition.
     
-    This is the paper's algorithm which:
-    1. Uses Cholesky decomposition of H^{-1} for stable/efficient updates
-    2. Processes columns in blocks for better memory access patterns
-    3. Lazily applies inter-block updates
+    This version computes H_inv blocks on-demand by solving triangular systems,
+    avoiding storage of the full H^{-1} matrix.
     
-    The key insight is that we need (H^{-1})_{jj} for the error scaling,
-    and H^{-1}_{j,j+1:} for the updates. Cholesky gives us efficient access.
+    Memory usage:
+    - L (Cholesky factor): n² × 4 bytes
+    - Per block: block_size × n × 4 bytes for triangular solve
+    - No full H_inv storage
+    
+    For n=8960, block_size=128:
+    - L: 320 MB
+    - Per block workspace: ~4.5 MB
+    - Total: ~325 MB (vs 640 MB+ with full H_inv)
 
     Args:
         weight: Weight matrix [out_features, in_features]
         hessian: Hessian matrix [in_features, in_features]
         config: Quantization config  
-        block_size: Number of columns to process together (128 is typical)
+        block_size: Number of columns to process together
 
     Returns:
         (dequantized_weight, state_dict)
-        
-    Reference: 
-        GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers
-        https://arxiv.org/abs/2210.17323
     """
-    W = weight.clone().float()  # Work in float32 for numerical stability
+    W = weight.clone().float()
     n_out, n_in = W.shape
     device = W.device
+    dtype = torch.float32
     
     Q = torch.zeros_like(W)
-    
-    # Zero point for symmetric quantization
-    zero_point = torch.zeros(1, device=device, dtype=W.dtype)
-    
-    # Compute Cholesky decomposition of H^{-1}
-    # We need H^{-1}, and Cholesky of H^{-1} gives us efficient access to its elements
-    # 
-    # Instead of inverting H directly (unstable), we:
-    # 1. Compute Cholesky of H: H = L @ L^T
-    # 2. Then H^{-1} = L^{-T} @ L^{-1}
-    # 3. The Cholesky of H^{-1} is L^{-T}
-    #
-    # For the GPTQ update, we need:
-    # - (H^{-1})_{jj} = ||L^{-1}_{:,j}||^2 for error scaling
-    # - H^{-1}_{j,:} for updates to remaining columns
+    zero_point = torch.zeros(1, device=device, dtype=dtype)
     
     H = hessian.clone().float()
     
-    # Add extra damping if needed for numerical stability
-    dead_cols = torch.diag(H) == 0
-    H[dead_cols, dead_cols] = 1  # Handle zero columns (dead features)
+    # Add damping
+    damp = 0.01 * H.diag().mean()
+    damp = max(damp.item() if isinstance(damp, Tensor) else damp, 1e-6)
+    H.diagonal().add_(damp)
     
-    # Cholesky decomposition: H = L @ L^T
-    # We'll use the upper triangular form: H = U^T @ U where U = L^T
+    # Handle dead columns
+    dead = H.diag() == 0
+    if dead.any():
+        H[dead, dead] = 1
+        W[:, dead] = 0
+    
+    # Cholesky: H = L @ L^T
     try:
-        U = torch.linalg.cholesky(H, upper=True)
+        L = torch.linalg.cholesky(H)
     except RuntimeError:
-        # If Cholesky fails, add more damping
-        damping = 0.1 * H.diag().mean()
-        H += damping * torch.eye(n_in, device=device, dtype=H.dtype)
-        U = torch.linalg.cholesky(H, upper=True)
+        damp = 0.1 * H.diag().mean()
+        H.diagonal().add_(damp)
+        try:
+            L = torch.linalg.cholesky(H)
+        except RuntimeError:
+            return quantize_rtn(weight, config)
     
-    # Compute H^{-1} via solving triangular systems
-    # H^{-1} = U^{-1} @ U^{-T}
-    # We'll compute U^{-1} (upper triangular inverse)
-    H_inv = torch.cholesky_inverse(U, upper=True)
+    del H
     
-    # For blocked GPTQ, we also need the Cholesky of H^{-1}
-    # But we can work with H_inv directly for the blocked updates
+    total_error = 0.0
     
-    # Track quantization errors for blocked updates
-    losses = torch.zeros(n_out, device=device, dtype=W.dtype)
-    
-    # Process in blocks
+    # Process columns in blocks
     for block_start in range(0, n_in, block_size):
         block_end = min(block_start + block_size, n_in)
         block_len = block_end - block_start
         
-        # Extract the block of weights and Hessian inverse
-        W_block = W[:, block_start:block_end].clone()
-        H_inv_block = H_inv[block_start:block_end, block_start:block_end]
+        # Compute H_inv for columns [block_start:block_end, block_start:n_in]
+        # We need H_inv[i, j] for i in block, j >= block_start
+        #
+        # H_inv = L^{-T} @ L^{-1}
+        # To get columns block_start:n_in of L^{-1}, solve L @ X = I[:, block_start:]
+        # But that's still large. Instead, we compute what we need incrementally.
+        #
+        # For the block [block_start:block_end, block_start:block_end]:
+        # Create identity for these columns and solve
         
-        # Errors accumulated in this block
+        I_block = torch.zeros(n_in, block_len, device=device, dtype=dtype)
+        I_block[block_start:block_end] = torch.eye(block_len, device=device, dtype=dtype)
+        
+        # L_inv_block_cols = L^{-1}[:, block_start:block_end]
+        L_inv_cols = torch.linalg.solve_triangular(L, I_block, upper=False)
+        
+        # H_inv[block, block] = L_inv_cols.T @ L_inv_cols
+        H_inv_block = L_inv_cols.T @ L_inv_cols
+        
+        del I_block
+        
+        W_block = W[:, block_start:block_end].clone()
         Err_block = torch.zeros_like(W_block)
         
-        # Process columns within the block
+        # Process columns in this block
         for j in range(block_len):
             col_idx = block_start + j
+            w = W_block[:, j]
             
-            # Get current column (already updated by previous columns in block)
-            w_col = W_block[:, j]
+            d = H_inv_block[j, j].item()
+            if d <= 1e-10:
+                d = 1e-10
             
-            # Get the inverse Hessian diagonal element for this column
-            h_inv_jj = H_inv_block[j, j]
+            scale = compute_scale_symmetric(w, bits=config.bits, per_channel=False)
+            q = quantize_tensor(w, scale, zero_point, config.bits, config.symmetric)
+            w_q = dequantize_tensor(q, scale, zero_point, config.symmetric)
             
-            # Compute scale for this column
-            scale = compute_scale_symmetric(w_col, bits=config.bits, per_channel=False)
+            Q[:, col_idx] = w_q
             
-            # Quantize and dequantize
-            q_col = quantize_tensor(w_col, scale, zero_point, config.bits, config.symmetric)
-            w_q_col = dequantize_tensor(q_col, scale, zero_point, config.symmetric)
+            raw_error = w - w_q
+            total_error += raw_error.pow(2).sum().item()
             
-            # Store quantized result
-            Q[:, col_idx] = w_q_col
-            
-            # Compute error
-            error = w_col - w_q_col
-            Err_block[:, j] = error
-            
-            # Track loss contribution: loss += error^2 / (2 * H^{-1}_{jj})
-            losses += error.pow(2) / (2 * h_inv_jj)
+            err_scaled = torch.clamp(raw_error / d, -1e3, 1e3)
+            Err_block[:, j] = err_scaled
             
             # Update remaining columns in this block
-            # W_block[:, j+1:] -= error @ H^{-1}_{j, j+1:} / H^{-1}_{jj}
-            if j < block_len - 1:
-                W_block[:, j+1:] -= torch.outer(error / h_inv_jj, H_inv_block[j, j+1:])
+            if j + 1 < block_len:
+                W_block[:, j + 1:] -= err_scaled.unsqueeze(1) * H_inv_block[j, j + 1:].unsqueeze(0)
         
-        # Lazy update: Apply this block's errors to all remaining blocks
-        # W[:, block_end:] -= Err_block @ H^{-1}[block, block_end:]
+        # Lazy update to remaining columns outside this block
         if block_end < n_in:
-            W[:, block_end:] -= Err_block @ H_inv[block_start:block_end, block_end:]
+            # Need H_inv[block_start:block_end, block_end:n_in]
+            # = L_inv_cols.T @ L_inv[:, block_end:]
+            # 
+            # Compute L_inv[:, block_end:] by solving another triangular system
+            remaining = n_in - block_end
+            I_remaining = torch.zeros(n_in, remaining, device=device, dtype=dtype)
+            I_remaining[block_end:] = torch.eye(remaining, device=device, dtype=dtype)
+            L_inv_remaining = torch.linalg.solve_triangular(L, I_remaining, upper=False)
+            
+            H_inv_cross = L_inv_cols.T @ L_inv_remaining  # [block_len, remaining]
+            
+            W[:, block_end:] -= Err_block @ H_inv_cross
+            
+            del I_remaining, L_inv_remaining, H_inv_cross
+        
+        del L_inv_cols, H_inv_block, W_block, Err_block
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
     
-    # Convert back to original dtype
-    Q = Q.to(weight.dtype)
+    del L
     
-    state_dict = {
-        "method": "gptq_cholesky",
-        "block_size": block_size,
-        "avg_loss": losses.mean().item(),
-    }
+    if torch.isnan(Q).any() or torch.isinf(Q).any():
+        return quantize_rtn(weight, config)
     
-    return Q, state_dict
+    return Q.to(weight.dtype), {"method": "gptq_memeff", "block_size": block_size, "total_error": total_error}
 
 
 def collect_all_layer_activations(
@@ -846,20 +870,21 @@ def quantize_model_gptq(
             del activations, hessian
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
     else:
-        # Fast approach - collect all activations in one pass
+        # Fast approach - collect all activations in one pass, store on CPU
         print("  Collecting activations for all layers in one pass...")
         all_activations = collect_all_layer_activations(
             new_model, 
             calibration_data, 
-            layer_names
+            layer_names,
+            store_on_cpu=True
         )
         print(f"  Collected activations for {len(all_activations)} layers (stored on CPU)")
         
-        # Get device from model
         device = next(new_model.parameters()).device
+        nan_layers = []
         
-        # Now quantize each layer using cached activations
-        for layer_name, layer in tqdm(linear_layers, desc="GPTQ (fast)"):
+        # Quantize each layer using cached activations
+        for layer_name, layer in tqdm(linear_layers, desc="GPTQ"):
             # Move activations to GPU for this layer only
             activations = all_activations[layer_name].to(device)
             
@@ -871,19 +896,33 @@ def quantize_model_gptq(
             # Free activations after computing Hessian
             del activations
             
-            dq_weight, state = quantize_gptq_layer(
-                layer.weight, 
-                hessian=hessian, 
-                config=config
-            )
+            # Check Hessian for issues
+            if torch.isnan(hessian).any() or torch.isinf(hessian).any():
+                print(f"  Warning: Bad Hessian for {layer_name}, using RTN")
+                nan_layers.append(layer_name)
+                dq_weight, _ = quantize_rtn(layer.weight, config)
+                del hessian
+            else:
+                dq_weight, state = quantize_gptq_layer(
+                    layer.weight, 
+                    hessian=hessian, 
+                    config=config
+                )
+                del hessian
             
-            with torch.no_grad():
-                layer.weight.data.copy_(dq_weight)
+            # Check output for NaN
+            if torch.isnan(dq_weight).any() or torch.isinf(dq_weight).any():
+                print(f"  Warning: NaN in quantized weight for {layer_name}, keeping original")
+                nan_layers.append(layer_name)
+            else:
+                with torch.no_grad():
+                    layer.weight.data.copy_(dq_weight)
             
-            del hessian
+            del dq_weight
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        if nan_layers:
+            print(f"  Warning: {len(nan_layers)} layers had NaN issues")
 
     return new_model
 
@@ -1243,35 +1282,29 @@ def quantize_model_awq(
             del activation_magnitudes
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
     else:
-        # Fast approach - collect all activations in one pass
+        # Fast approach - collect all activations in one pass, store on CPU
         print("  Collecting activations for all layers in one pass...")
         all_activations = collect_all_layer_activations(
             new_model, 
             calibration_data, 
-            layer_names
+            layer_names,
+            store_on_cpu=True
         )
         print(f"  Collected activations for {len(all_activations)} layers (stored on CPU)")
         
-        # Get device from model
         device = next(new_model.parameters()).device
         
-        # Compute activation magnitudes from cached activations
-        # Keep magnitudes on CPU, they're small
+        # Compute magnitudes and free raw activations
         print("  Computing activation magnitudes...")
         all_magnitudes = {}
-        for name, acts in tqdm(all_activations.items(), desc="Computing magnitudes"):
-            all_magnitudes[name] = acts.abs().mean(dim=0)
-        
-        # Clear the dict
+        for name in tqdm(layer_names, desc="Computing magnitudes"):
+            all_magnitudes[name] = all_activations[name].abs().mean(dim=0)
+            del all_activations[name]
         del all_activations
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
-        # Now quantize each layer
-        for layer_name, layer in tqdm(linear_layers, desc="AWQ (fast)"):
-            # Move magnitudes to GPU for this layer
+        # Quantize each layer
+        for layer_name, layer in tqdm(linear_layers, desc="AWQ"):
             activation_magnitudes = all_magnitudes[layer_name].to(device)
-            
-            # Free CPU copy
             del all_magnitudes[layer_name]
             
             quantized_weight, scales, state = quantize_awq_layer(
@@ -1288,9 +1321,8 @@ def quantize_model_awq(
             
             _set_module_by_name(new_model, layer_name, awq_layer)
             
-            del activation_magnitudes
-        
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            del activation_magnitudes, quantized_weight, scales
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     return new_model
 

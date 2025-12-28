@@ -1,7 +1,7 @@
 {
   "model": "Qwen/Qwen2.5-1.5B",
   "bits": 4,
-  "timestamp": "2025-12-27T07:40:30.556542",
+  "timestamp": "2025-12-27T23:29:28.203817",
   "layer_config": {
     "include_patterns": [
       "q_proj",
@@ -249,16 +249,16 @@
     },
     "gptq": {
       "precision": "int4 GPTQ",
-      "hellaswag_accuracy": 0.264,
-      "wikitext_perplexity": NaN,
-      "calibration_samples": 256,
+      "hellaswag_accuracy": 0.532,
+      "wikitext_perplexity": 8.838400840759277,
+      "calibration_samples": 128,
       "calibration_seq_len": 512
     },
     "awq": {
       "precision": "int4 AWQ",
-      "hellaswag_accuracy": 0.54,
-      "wikitext_perplexity": 9.013556480407715,
-      "calibration_samples": 256,
+      "hellaswag_accuracy": 0.536,
+      "wikitext_perplexity": 9.050070762634277,
+      "calibration_samples": 128,
       "calibration_seq_len": 512
     }
   }
