@@ -1,7 +1,7 @@
 {
   "model": "Qwen/Qwen2.5-1.5B",
   "bits": 4,
-  "timestamp": "2025-12-27T23:29:28.203817",
+  "timestamp": "2025-12-28T01:45:52.095440",
   "layer_config": {
     "include_patterns": [
       "q_proj",
@@ -229,37 +229,27 @@
   "experiments": {
     "baseline": {
       "precision": "fp16",
-      "hellaswag_accuracy": 0.546,
-      "wikitext_perplexity": 8.07194995880127
-    },
-    "rtn_per_tensor": {
-      "precision": "int4 (per-tensor)",
-      "hellaswag_accuracy": 0.322,
-      "wikitext_perplexity": 628.0218505859375
-    },
-    "rtn_per_channel": {
-      "precision": "int4 (per-channel)",
-      "hellaswag_accuracy": 0.522,
-      "wikitext_perplexity": 9.073755264282227
-    },
-    "absmax_per_channel": {
-      "precision": "int4 absmax (per-channel)",
-      "hellaswag_accuracy": 0.522,
-      "wikitext_perplexity": 9.073755264282227
+      "hellaswag_accuracy": 0.548,
+      "wikitext_perplexity": 8.07165813446045
     },
     "gptq": {
       "precision": "int4 GPTQ",
-      "hellaswag_accuracy": 0.532,
-      "wikitext_perplexity": 8.838400840759277,
-      "calibration_samples": 128,
-      "calibration_seq_len": 512
+      "hellaswag_accuracy": 0.514,
+      "wikitext_perplexity": 8.833617210388184,
+      "calibration_samples": 64,
+      "calibration_seq_len": 256
     },
     "awq": {
       "precision": "int4 AWQ",
-      "hellaswag_accuracy": 0.536,
-      "wikitext_perplexity": 9.050070762634277,
-      "calibration_samples": 128,
-      "calibration_seq_len": 512
+      "hellaswag_accuracy": 0.546,
+      "wikitext_perplexity": 9.030173301696777,
+      "calibration_samples": 64,
+      "calibration_seq_len": 256
+    },
+    "bitsandbytes": {
+      "precision": "4-bit bnb (NF4)",
+      "hellaswag_accuracy": 0.516,
+      "wikitext_perplexity": 8.682578086853027
     }
   }
 }

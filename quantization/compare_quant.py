@@ -240,7 +240,7 @@ def load_model_bitsandbytes(
         model_name,
         quantization_config=bnb_config,
         device_map="auto",
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
     )
     
     return model, tokenizer
@@ -492,7 +492,7 @@ def run_comparison(
         
         try:
             # Use fast mode (sequential=False) by default
-            model_gptq = quantize_model_gptq(model, calibration_data, config_gptq, sequential=False)
+            model_gptq = quantize_model_gptq(model, calibration_data, config_gptq, sequential=True)
             
             gptq_hella = evaluate_hellaswag(model_gptq, tokenizer, hellaswag)
             gptq_ppl = evaluate_perplexity(model_gptq, tokenizer, wikitext)
@@ -739,7 +739,7 @@ Exclude presets: none, default, embed_only, head_only
     parser.add_argument(
         "--calibration-samples",
         type=int,
-        default=64,
+        default=32,
         help="Number of calibration samples for GPTQ/AWQ"
     )
     parser.add_argument(

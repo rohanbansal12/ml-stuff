@@ -1,7 +1,7 @@
 {
   "model": "Qwen/Qwen2.5-1.5B",
   "bits": 4,
-  "timestamp": "2025-12-28T00:11:30.083600",
+  "timestamp": "2025-12-28T06:12:43.529114",
   "layer_config": {
     "include_patterns": null,
     "exclude_patterns": [
@@ -224,35 +224,42 @@
   "experiments": {
     "baseline": {
       "precision": "fp16",
-      "hellaswag_accuracy": 0.546,
-      "wikitext_perplexity": 8.07194995880127
+      "hellaswag_accuracy": 0.548,
+      "wikitext_perplexity": 8.07165813446045
     },
     "rtn_per_tensor": {
       "precision": "int4 (per-tensor)",
       "hellaswag_accuracy": 0.264,
-      "wikitext_perplexity": 10883628.0
+      "wikitext_perplexity": 10892309.0
     },
     "rtn_per_channel": {
       "precision": "int4 (per-channel)",
-      "hellaswag_accuracy": 0.484,
-      "wikitext_perplexity": 14.201126098632812
+      "hellaswag_accuracy": 0.478,
+      "wikitext_perplexity": 14.198935508728027
     },
     "absmax_per_channel": {
       "precision": "int4 absmax (per-channel)",
-      "hellaswag_accuracy": 0.484,
-      "wikitext_perplexity": 14.201126098632812
+      "hellaswag_accuracy": 0.478,
+      "wikitext_perplexity": 14.198935508728027
     },
     "gptq": {
       "precision": "int4 GPTQ",
-      "error": "CUDA out of memory. Tried to allocate 560.00 MiB. GPU 0 has a total capacity of 23.52 GiB of which 283.69 MiB is free. Process 3022503 has 23.23 GiB memory in use. Of the allocated memory 22.17 GiB is allocated by PyTorch, and 583.60 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+      "hellaswag_accuracy": 0.496,
+      "wikitext_perplexity": 13.93529987335205,
+      "calibration_samples": 32,
+      "calibration_seq_len": 256
     },
     "awq": {
       "precision": "int4 AWQ",
-      "error": "CUDA out of memory. Tried to allocate 28.00 MiB. GPU 0 has a total capacity of 23.52 GiB of which 17.69 MiB is free. Process 3022503 has 23.49 GiB memory in use. Of the allocated memory 22.59 GiB is allocated by PyTorch, and 415.62 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+      "hellaswag_accuracy": 0.506,
+      "wikitext_perplexity": 13.626382827758789,
+      "calibration_samples": 32,
+      "calibration_seq_len": 256
     },
     "bitsandbytes": {
-      "precision": "4-bit bnb",
-      "error": "CUDA out of memory. Tried to allocate 2.32 GiB. GPU 0 has a total capacity of 23.52 GiB of which 741.69 MiB is free. Process 3022503 has 22.78 GiB memory in use. Of the allocated memory 21.94 GiB is allocated by PyTorch, and 357.87 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+      "precision": "4-bit bnb (NF4)",
+      "hellaswag_accuracy": 0.516,
+      "wikitext_perplexity": 8.682578086853027
     }
   }
 }

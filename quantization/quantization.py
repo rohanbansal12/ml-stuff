@@ -528,74 +528,14 @@ def compute_hessian(X: Tensor) -> Tensor:
     
     H = X.T @ X
     
-    # Add damping for numerical stability
-    diag_mean = H.diag().mean()
-    if diag_mean <= 0 or torch.isnan(diag_mean):
-        diag_mean = 1.0
-    damping = 0.01 * diag_mean
-    H.diagonal().add_(damping)
-    
     return H
-
-
-def quantize_gptq_layer_simple(
-    weight: Tensor,
-    hessian: Tensor,
-    config: QuantConfig,
-) -> tuple[Tensor, dict]:
-    """
-    Simple GPTQ implementation - processes one column at a time.
-    
-    This is the naive O(d^3) version for understanding the algorithm.
-    Use quantize_gptq_layer for the efficient blocked version.
-
-    Args:
-        weight: Weight matrix [out_features, in_features]
-        hessian: Hessian matrix [in_features, in_features]
-        config: Quantization config
-
-    Returns:
-        (dequantized_weight, state_dict)
-    """
-    W = weight.clone()
-    Q = torch.zeros_like(W)
-    n_out, n_in = W.shape
-    
-    # Zero point for symmetric quantization
-    zero_point = torch.zeros(1, device=W.device, dtype=W.dtype)
-    
-    # Process columns left to right
-    for j in range(n_in):
-        # 1. Get current column
-        w_col = W[:, j]
-        
-        # 2. Compute scale for this column
-        # Use per-tensor scale for the column (scalar)
-        scale = compute_scale_symmetric(w_col, bits=config.bits, per_channel=False)
-        
-        # 3. Quantize and dequantize
-        q_col = quantize_tensor(w_col, scale, zero_point, config.bits, config.symmetric)
-        w_q_col = dequantize_tensor(q_col, scale, zero_point, config.symmetric)
-        
-        # 4. Store quantized column
-        Q[:, j] = w_q_col
-        
-        # 5. Compute quantization error
-        error = w_col - w_q_col  # [out_features]
-        
-        # 6. Update remaining columns to compensate
-        # The key GPTQ update: W[:, j+1:] -= error[:, None] * H[j, j+1:] / H[j, j]
-        if j < n_in - 1:
-            W[:, j+1:] -= torch.outer(error, hessian[j, j+1:]) / hessian[j, j]
-    
-    return Q, {"method": "gptq_simple"}
 
 
 def quantize_gptq_layer(
     weight: Tensor,
     hessian: Tensor,
     config: QuantConfig,
-    block_size: int = 128,
+    block_size: int = 64,
 ) -> tuple[Tensor, dict]:
     """
     Memory-efficient GPTQ using Cholesky decomposition.
@@ -630,113 +570,68 @@ def quantize_gptq_layer(
     Q = torch.zeros_like(W)
     zero_point = torch.zeros(1, device=device, dtype=dtype)
     
-    H = hessian.clone().float()
-    
-    # Add damping
-    damp = 0.01 * H.diag().mean()
-    damp = max(damp.item() if isinstance(damp, Tensor) else damp, 1e-6)
-    H.diagonal().add_(damp)
-    
-    # Handle dead columns
-    dead = H.diag() == 0
-    if dead.any():
-        H[dead, dead] = 1
-        W[:, dead] = 0
+    H = hessian.detach().float()
+    dead = torch.diag(H) == 0
+    H[dead, dead] = 1.0
+    W[:, dead] = 0.0
+
+    diag_mean = H.diag().mean()
+    if diag_mean <= 0 or torch.isnan(diag_mean):
+        diag_mean = 1.0
+    damping = 0.01 * diag_mean
+    diag = torch.arange(H.size(0), device=H.device)
+    H[diag, diag] += damping
+
+    perm = torch.argsort(H.diag())
+    inv_perm = torch.argsort(perm)  # To restore original order at the end
+    W = W[:, perm]
+    H = H[perm][:, perm]
     
     # Cholesky: H = L @ L^T
-    try:
-        L = torch.linalg.cholesky(H)
-    except RuntimeError:
-        damp = 0.1 * H.diag().mean()
-        H.diagonal().add_(damp)
-        try:
-            L = torch.linalg.cholesky(H)
-        except RuntimeError:
-            return quantize_rtn(weight, config)
-    
-    del H
-    
+    H = torch.linalg.cholesky(H)
+    H = torch.cholesky_inverse(H)
+    H = torch.linalg.cholesky(H, upper=True)
+    H_inv = H
+
     total_error = 0.0
     
     # Process columns in blocks
     for block_start in range(0, n_in, block_size):
         block_end = min(block_start + block_size, n_in)
         block_len = block_end - block_start
-        
-        # Compute H_inv for columns [block_start:block_end, block_start:n_in]
-        # We need H_inv[i, j] for i in block, j >= block_start
-        #
-        # H_inv = L^{-T} @ L^{-1}
-        # To get columns block_start:n_in of L^{-1}, solve L @ X = I[:, block_start:]
-        # But that's still large. Instead, we compute what we need incrementally.
-        #
-        # For the block [block_start:block_end, block_start:block_end]:
-        # Create identity for these columns and solve
-        
-        I_block = torch.zeros(n_in, block_len, device=device, dtype=dtype)
-        I_block[block_start:block_end] = torch.eye(block_len, device=device, dtype=dtype)
-        
-        # L_inv_block_cols = L^{-1}[:, block_start:block_end]
-        L_inv_cols = torch.linalg.solve_triangular(L, I_block, upper=False)
-        
-        # H_inv[block, block] = L_inv_cols.T @ L_inv_cols
-        H_inv_block = L_inv_cols.T @ L_inv_cols
-        
-        del I_block
-        
-        W_block = W[:, block_start:block_end].clone()
+
+        H_inv_block = H_inv[block_start:block_end, block_start:block_end]
+        H_inv_cross = H_inv[block_start:block_end, block_end:]
+
+        W_block = W[:, block_start:block_end]
         Err_block = torch.zeros_like(W_block)
-        
-        # Process columns in this block
+
         for j in range(block_len):
             col_idx = block_start + j
-            w = W_block[:, j]
-            
-            d = H_inv_block[j, j].item()
-            if d <= 1e-10:
-                d = 1e-10
-            
+
+            w = W_block[:, j].clone()  # Clone to avoid aliasing issues
+
             scale = compute_scale_symmetric(w, bits=config.bits, per_channel=False)
             q = quantize_tensor(w, scale, zero_point, config.bits, config.symmetric)
             w_q = dequantize_tensor(q, scale, zero_point, config.symmetric)
-            
+
             Q[:, col_idx] = w_q
-            
+
+            d = H_inv_block[j, j].item()
             raw_error = w - w_q
             total_error += raw_error.pow(2).sum().item()
-            
             err_scaled = torch.clamp(raw_error / d, -1e3, 1e3)
+            
             Err_block[:, j] = err_scaled
             
             # Update remaining columns in this block
             if j + 1 < block_len:
-                W_block[:, j + 1:] -= err_scaled.unsqueeze(1) * H_inv_block[j, j + 1:].unsqueeze(0)
+                W_block[:, (j + 1):].addr_(err_scaled, H_inv_block[j, (j + 1):], alpha=-1.0)
         
-        # Lazy update to remaining columns outside this block
         if block_end < n_in:
-            # Need H_inv[block_start:block_end, block_end:n_in]
-            # = L_inv_cols.T @ L_inv[:, block_end:]
-            # 
-            # Compute L_inv[:, block_end:] by solving another triangular system
-            remaining = n_in - block_end
-            I_remaining = torch.zeros(n_in, remaining, device=device, dtype=dtype)
-            I_remaining[block_end:] = torch.eye(remaining, device=device, dtype=dtype)
-            L_inv_remaining = torch.linalg.solve_triangular(L, I_remaining, upper=False)
-            
-            H_inv_cross = L_inv_cols.T @ L_inv_remaining  # [block_len, remaining]
-            
-            W[:, block_end:] -= Err_block @ H_inv_cross
-            
-            del I_remaining, L_inv_remaining, H_inv_cross
-        
-        del L_inv_cols, H_inv_block, W_block, Err_block
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            W[:, block_end:] -= torch.matmul(Err_block, H_inv_cross)
     
-    del L
-    
-    if torch.isnan(Q).any() or torch.isinf(Q).any():
-        return quantize_rtn(weight, config)
-    
+    Q = Q[:, inv_perm]
     return Q.to(weight.dtype), {"method": "gptq_memeff", "block_size": block_size, "total_error": total_error}
 
 
