@@ -19,39 +19,39 @@ class Config:
     """DQN training configuration."""
 
     # Core DQN hyperparameters
-    lr: float = 1e-4
+    lr: float = 2.5e-4
     gamma: float = 0.99
 
     # Exploration
     eps_start: float = 1.0  # Initial exploration rate
     eps_end: float = 0.05  # Final exploration rate
-    eps_decay_steps: int = 50_000  # Steps to decay epsilon over
+    eps_decay_steps: int = 50000  # Steps to decay epsilon over
 
     # Target network
-    target_update_freq: int = 1000  # Steps between target network updates
+    target_update_freq: int = 500  # Steps between target network updates
     tau: float = 1.0  # 1.0 = hard update, <1.0 = soft (Polyak) update
 
     # Replay buffer
-    buffer_size: int = 100_000
-    batch_size: int = 64
-    learning_starts: int = 1_000  # Random actions before learning
+    buffer_size: int = 10000
+    batch_size: int = 128
+    learning_starts: int = 10000  # Random actions before learning
 
     # Architecture
-    hidden_sizes: tuple = (128, 128)
+    hidden_sizes: tuple = (120, 84)
 
     # Environment
     env_name: str = "CartPole-v1"
     num_envs: int = 1  # DQN typically uses 1 env
 
     # Training duration
-    total_timesteps: int = 200_000
+    total_timesteps: int = 500000
 
     # Evaluation
     eval_interval: int = 5_000
     eval_episodes: int = 10
 
     # Misc
-    seed: int = 42
+    seed: int = 1
     log_dir: str = "./runs"
 
     def to_dict(self):
@@ -224,7 +224,8 @@ class DQNAgent:
         q_preds = q_preds[torch.arange(len(actions)), actions]
 
         with torch.no_grad():
-            q_target = self.target_net(next_obs).max(dim=-1).values
+            best_actions = self.q_net(next_obs).argmax(dim=-1)
+            q_target = self.target_net(next_obs).gather(1, best_actions.unsqueeze(-1)).squeeze(-1)
             y = rewards + self.config.gamma * q_target * (1 - dones)
 
         # Huber loss instead of MSE (more robust to outliers)
@@ -234,7 +235,7 @@ class DQNAgent:
         loss.backward()
 
         # Gradient clipping (prevents exploding gradients)
-        torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=10.0)
+        # torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=0.5)
 
         self.optimizer.step()
 

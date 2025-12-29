@@ -353,23 +353,16 @@ class SoftActorNet(nn.Module):
 class QNet(nn.Module):
     """Q-network for DQN. Maps state -> Q-values for all actions."""
 
-    def __init__(self, obs_dim: int, action_dim: int, hidden_sizes: tuple = (128, 128)):
+    def __init__(self, obs_dim: int, action_dim: int, hidden_sizes: tuple = (120, 84)):
         super().__init__()
 
         self.net = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, hidden_sizes[0])),
+            nn.Linear(obs_dim, hidden_sizes[0]),
             nn.ReLU(),
-            layer_init(nn.Linear(hidden_sizes[0], hidden_sizes[1])),
+            nn.Linear(hidden_sizes[0], hidden_sizes[1]),
             nn.ReLU(),
-            layer_init(nn.Linear(hidden_sizes[1], action_dim), std=1.0),
+            nn.Linear(hidden_sizes[1], action_dim),
         )
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            obs: Observation tensor of shape (batch, obs_dim) or (obs_dim,)
-            
-        Returns:
-            q_values: Q-values for all actions, shape (batch, action_dim) or (action_dim,)
-        """
         return self.net(obs)

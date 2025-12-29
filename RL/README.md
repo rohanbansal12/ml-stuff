@@ -14,6 +14,7 @@ This repository documents a step-by-step journey through fundamental RL algorith
 | **A2C** | On-policy, Actor-Critic | Discrete | Value baseline, GAE, variance reduction |
 | **PPO** | On-policy, Actor-Critic | Discrete/Continuous | Clipped surrogate, importance sampling |
 | **SAC** | Off-policy, Actor-Critic | Continuous | Maximum entropy, twin Q-networks, replay buffer |
+| **DQN** | Off-policy, Value-Based | Discrete | Q-learning, replay buffer, target networks |
 
 ---
 
@@ -320,23 +321,138 @@ $$L_\alpha = -\mathbb{E} \left[ \alpha \left( \log \pi(a|s) + \bar{\mathcal{H}} 
 
 ---
 
+## Stage 6: Deep Q-Network (DQN)
+
+### Theory
+
+DQN is a **value-based** method that learns the optimal action-value function $Q^*(s, a)$ directly, rather than learning a policy. This represents a fundamentally different approach from the policy gradient methods above.
+
+#### Q-Learning
+
+The optimal Q-function satisfies the Bellman optimality equation:
+
+$$Q^*(s, a) = \mathbb{E}\left[ r + \gamma \max_{a'} Q^*(s', a') \right]$$
+
+We approximate $Q^*$ with a neural network $Q_\theta$ and minimize the TD error:
+
+$$L(\theta) = \mathbb{E}\left[ \left( Q_\theta(s, a) - y \right)^2 \right]$$
+
+where the target is:
+
+$$y = r + \gamma \max_{a'} Q_\theta(s', a')$$
+
+#### The Deadly Triad
+
+Naive Q-learning with function approximation is unstable due to:
+1. **Bootstrapping** — targets depend on current estimates
+2. **Off-policy learning** — learning from old experiences
+3. **Function approximation** — neural networks generalize unpredictably
+
+DQN addresses these with two key innovations:
+
+#### Experience Replay
+
+Store transitions $(s, a, r, s', done)$ in a replay buffer and sample random minibatches. This:
+- Breaks correlation between consecutive samples
+- Reuses experiences for sample efficiency
+- Smooths over the data distribution
+
+#### Target Networks
+
+Use a separate target network $Q_{\theta^-}$ for computing targets:
+
+$$y = r + \gamma \max_{a'} Q_{\theta^-}(s', a')$$
+
+The target network is updated periodically (hard update) or slowly (Polyak averaging):
+
+$$\theta^- \leftarrow \tau \theta + (1 - \tau) \theta^-$$
+
+This stabilizes learning by keeping targets fixed during updates.
+
+#### Epsilon-Greedy Exploration
+
+Since we learn Q-values (not a stochastic policy), we need explicit exploration:
+
+$$a = \begin{cases} \text{random action} & \text{with probability } \epsilon \\ \arg\max_a Q_\theta(s, a) & \text{otherwise} \end{cases}$$
+
+Epsilon decays from 1.0 to ~0.05 over training.
+
+### Implementation
+
+```python
+# Core DQN update
+q_values = q_net(obs)
+q_pred = q_values[range(batch_size), actions]  # Q(s, a) for taken actions
+
+with torch.no_grad():
+    q_target = target_net(next_obs).max(dim=-1).values
+    y = rewards + gamma * q_target * (1 - dones)
+
+loss = F.smooth_l1_loss(q_pred, y)  # Huber loss
+```
+
+**Key hyperparameters:** `lr=2.5e-4`, `batch_size=128`, `buffer_size=10000`, `target_update_freq=500`, `learning_starts=10000`, `eps_decay_steps=50000`
+
+### Double DQN (Optional Extension)
+
+Standard DQN overestimates Q-values because the max operator selects and evaluates with the same network. Double DQN decouples selection and evaluation:
+
+```python
+# Standard DQN
+q_target = target_net(next_obs).max(dim=-1).values
+
+# Double DQN — use online net to SELECT, target net to EVALUATE
+best_actions = q_net(next_obs).argmax(dim=-1)
+q_target = target_net(next_obs).gather(1, best_actions.unsqueeze(-1)).squeeze(-1)
+```
+
+### Results on CartPole-v1
+
+| Metric | Value |
+|--------|-------|
+| Steps to solve | ~300k-400k |
+| Final avg return | 400-500 |
+| Variance | Medium-High |
+
+**Observations:**
+- **Do NOT use orthogonal initialization** — unlike policy gradient methods, DQN works better with default PyTorch initialization (Kaiming/He)
+- Huber loss (`smooth_l1_loss`) is more stable than MSE for Q-learning
+- Long warmup period (10k steps) is critical for filling replay buffer with diverse experiences
+- Target network updates every 500 steps provide good stability
+- Single-seed runs show high variance; curves are smoother when averaged across seeds
+- Loss can increase during training even as performance improves — this is normal as Q-values grow
+
+### DQN vs Policy Gradient
+
+| Aspect | DQN | Policy Gradient (PPO) |
+|--------|-----|----------------------|
+| What it learns | Q-values | Policy directly |
+| Exploration | Epsilon-greedy (explicit) | Entropy bonus (implicit) |
+| Action space | Discrete only | Discrete or continuous |
+| Sample efficiency | High (off-policy) | Lower (on-policy) |
+| Stability | Can be unstable | Generally more stable |
+| Initialization | Default (Kaiming) | Orthogonal preferred |
+
+---
+
 ## Comparison Summary
 
 ### Sample Efficiency
 
-| Environment | REINFORCE | A2C | PPO | SAC |
-|-------------|-----------|-----|-----|-----|
-| CartPole-v1 | ~150k steps | ~400k steps | ~75k steps | — |
-| Pendulum-v1 | — | — | ~3M steps (RPO) | ~75k steps |
+| Environment | REINFORCE | A2C | PPO | DQN | SAC |
+|-------------|-----------|-----|-----|-----|-----|
+| CartPole-v1 | ~150k steps | ~400k steps | ~75k steps | ~350k steps | — |
+| Pendulum-v1 | — | — | ~3M steps (RPO) | — | ~75k steps |
 
 ### Algorithm Selection Guide
 
 | Scenario | Recommended | Reason |
 |----------|-------------|--------|
-| Discrete actions, simple env | PPO | Robust, stable |
-| Continuous control | SAC | Sample efficient |
-| Need on-policy | PPO + RPO | Handles continuous |
-| Limited compute | SAC | Off-policy efficiency |
+| Discrete actions, simple env | PPO or DQN | Both robust; PPO faster, DQN more sample efficient |
+| Continuous control | SAC | Sample efficient, handles continuous naturally |
+| Need on-policy | PPO + RPO | Handles continuous with RPO fix |
+| Limited compute | SAC or DQN | Off-policy efficiency |
+| Learning Q-values matters | DQN | Direct access to action values |
 
 ### Key Lessons Learned
 
@@ -359,6 +475,12 @@ $$L_\alpha = -\mathbb{E} \left[ \alpha \left( \log \pi(a|s) + \bar{\mathcal{H}} 
    - Off-policy = massive sample efficiency gains
    - Entropy tuning handles exploration automatically
 
+6. **DQN:** Value-based alternative for discrete actions
+   - Use default initialization, NOT orthogonal
+   - Huber loss + target networks essential for stability
+   - Long warmup period (10k+ steps) fills buffer with diverse data
+   - Double DQN reduces overestimation if needed
+
 ---
 
 ## Hyperparameter Debugging Guide
@@ -372,6 +494,8 @@ $$L_\alpha = -\mathbb{E} \left[ \alpha \left( \log \pi(a|s) + \bar{\mathcal{H}} 
 | `clip_fraction` (PPO) | 0.1-0.2 | Too high → lower LR |
 | `approx_kl` (PPO) | < 0.02 | Spiking → enable `target_kl` |
 | `alpha` (SAC) | Decreasing | Stuck high → check target entropy |
+| `loss` (DQN) | Stable or slowly increasing | Exploding → add Huber loss, gradient clipping |
+| `epsilon` (DQN) | Decaying to ~0.05 | — |
 
 ### Common Failure Modes
 
@@ -392,6 +516,7 @@ $$L_\alpha = -\mathbb{E} \left[ \alpha \left( \log \pi(a|s) + \bar{\mathcal{H}} 
 ├── ppo.py                # PPO for discrete actions
 ├── ppo_continuous.py     # PPO for continuous actions (with RPO)
 ├── sac.py                # Soft Actor-Critic
+├── dqn.py                # Deep Q-Network
 ├── net.py                # Neural network architectures
 ├── util.py               # Buffers (RolloutBuffer, ReplayBuffer)
 └── README.md
@@ -421,6 +546,9 @@ python ppo_continuous.py --use_rpo --rpo_alpha 0.5 --total_timesteps 3000000
 
 # SAC on Pendulum (fastest to solve)
 python sac.py --total_timesteps 100000
+
+# DQN on CartPole
+python dqn.py --lr 2.5e-4 --learning_starts 10000 --total_timesteps 500000
 ```
 
 ### Monitoring
@@ -434,6 +562,8 @@ tensorboard --logdir ./runs
 ## References
 
 - [Policy Gradient Methods for RL with Function Approximation](https://proceedings.neurips.cc/paper/1999/file/464d828b85b0bed98e80ade0a5c43b0f-Paper.pdf) — Sutton et al., 1999
+- [Playing Atari with Deep Reinforcement Learning](https://arxiv.org/abs/1312.5602) — Mnih et al., 2013 (DQN)
+- [Deep Reinforcement Learning with Double Q-learning](https://arxiv.org/abs/1509.06461) — van Hasselt et al., 2015 (Double DQN)
 - [High-Dimensional Continuous Control Using GAE](https://arxiv.org/abs/1506.02438) — Schulman et al., 2015
 - [Proximal Policy Optimization Algorithms](https://arxiv.org/abs/1707.06347) — Schulman et al., 2017
 - [Soft Actor-Critic](https://arxiv.org/abs/1801.01290) — Haarnoja et al., 2018
