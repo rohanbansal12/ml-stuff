@@ -204,21 +204,36 @@ class ReplayBuffer:
             self.full = True
             self.ptr = 0
 
-    def sample(self, batch_size: int) -> tuple[torch.Tensor, ...]:
-        """Sample a random batch of transitions."""
+    def sample(
+        self, batch_size: int, device: torch.device = None
+    ) -> tuple[torch.Tensor, ...]:
+        """Sample a random batch of transitions.
+
+        Args:
+            batch_size: Number of transitions to sample
+            device: Device to transfer samples to (None = keep on buffer device)
+        """
         max_idx = self.buffer_size if self.full else self.ptr
 
         # Random indices into (time, env) dimensions
         batch_idx = torch.randint(0, max_idx, (batch_size,), device=self.device)
         env_idx = torch.randint(0, self.num_envs, (batch_size,), device=self.device)
 
-        return (
-            self.observations[batch_idx, env_idx],
-            self.next_observations[batch_idx, env_idx],
-            self.actions[batch_idx, env_idx],
-            self.rewards[batch_idx, env_idx].unsqueeze(-1),
-            self.dones[batch_idx, env_idx].unsqueeze(-1),
-        )
+        obs = self.observations[batch_idx, env_idx]
+        next_obs = self.next_observations[batch_idx, env_idx]
+        actions = self.actions[batch_idx, env_idx]
+        rewards = self.rewards[batch_idx, env_idx].unsqueeze(-1)
+        dones = self.dones[batch_idx, env_idx].unsqueeze(-1)
+
+        # Transfer to target device if specified
+        if device is not None and device != self.device:
+            obs = obs.to(device)
+            next_obs = next_obs.to(device)
+            actions = actions.to(device)
+            rewards = rewards.to(device)
+            dones = dones.to(device)
+
+        return obs, next_obs, actions, rewards, dones
 
     def __len__(self) -> int:
         return (
