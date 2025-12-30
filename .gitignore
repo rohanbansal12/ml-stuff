@@ -14,6 +14,7 @@ ckpts/
 .vscode/
 .venv/
 ddpm/data/
+VAE/data/
 
 # Distribution / packaging
 .Python

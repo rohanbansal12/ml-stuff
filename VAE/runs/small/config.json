@@ -1,0 +1,36 @@
+{
+  "model": {
+    "channels": 64,
+    "channel_mults": [
+      1,
+      2,
+      4
+    ],
+    "latent_dim": 128,
+    "latent_channels": 4,
+    "groups": 8,
+    "num_res_blocks": 2,
+    "use_spatial_latent": true
+  },
+  "train": {
+    "batch_size": 128,
+    "num_workers": 4,
+    "epochs": 50,
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "kl_weight": 1.0,
+    "kl_warmup_epochs": 10,
+    "recon_loss": "mse",
+    "log_every": 50,
+    "sample_every": 5,
+    "save_every": 20,
+    "num_samples": 16,
+    "mixed_precision": "no",
+    "compile_model": false,
+    "tf32": true
+  },
+  "run_name": "small",
+  "seed": 42,
+  "data_dir": "./data",
+  "log_dir": "./runs"
+}
