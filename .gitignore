@@ -13,6 +13,7 @@ data/*
 ckpts/
 .vscode/
 .venv/
+ddpm/data/
 
 # Distribution / packaging
 .Python

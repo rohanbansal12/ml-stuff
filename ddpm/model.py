@@ -1,168 +1,397 @@
+"""
+U-Net backbone for DDPM.
+
+Architecture follows the original DDPM paper with some improvements:
+- Configurable channel multipliers for each resolution
+- Optional attention at specified resolutions
+- Time conditioning via addition after first conv in each ResBlock
+- Skip connections between encoder and decoder
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from config import ModelConfig
+
+
+class SinusoidalPosEmb(nn.Module):
+    """Sinusoidal positional embeddings for timesteps."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        device = t.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = t.float()[:, None] * emb[None, :]
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+        return emb
+
+
+class TimeEmbedding(nn.Module):
+    """Time embedding: sinusoidal → MLP."""
+
+    def __init__(self, time_dim: int):
+        super().__init__()
+        self.sinusoidal = SinusoidalPosEmb(time_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(time_dim, time_dim * 4),
+            nn.SiLU(),
+            nn.Linear(time_dim * 4, time_dim),
+        )
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        return self.mlp(self.sinusoidal(t))
+
 
 class SelfAttention2d(nn.Module):
-    def __init__(self, channels):
+    """
+    Self-attention for 2D feature maps.
+    Uses PyTorch's scaled_dot_product_attention for automatic FlashAttention.
+    """
+
+    def __init__(self, channels: int, num_heads: int = 4):
         super().__init__()
         self.channels = channels
-        self.norm = nn.GroupNorm(1, channels)  # or LayerNorm over C with reshape
+        self.num_heads = num_heads
+        self.head_dim = channels // num_heads
 
+        self.norm = nn.GroupNorm(1, channels)
         self.qkv = nn.Conv2d(channels, channels * 3, kernel_size=1)
-        self.proj_out = nn.Conv2d(channels, channels, kernel_size=1)
+        self.proj = nn.Conv2d(channels, channels, kernel_size=1)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
+
         h = self.norm(x)
+        qkv = self.qkv(h)
+        q, k, v = torch.chunk(qkv, 3, dim=1)
 
-        qkv = self.qkv(h)                     # [B, 3C, H, W]
-        q, k, v = torch.chunk(qkv, 3, dim=1)  # each [B, C, H, W]
+        # Reshape for multi-head attention: [B, heads, HW, head_dim]
+        def reshape(t):
+            return t.view(B, self.num_heads, self.head_dim, H * W).transpose(2, 3)
 
-        # flatten spatial
-        q = q.reshape(B, C, H * W).transpose(1, 2)  # [B, HW, C]
-        k = k.reshape(B, C, H * W).transpose(1, 2)  # [B, HW, C]
-        v = v.reshape(B, C, H * W).transpose(1, 2)  # [B, HW, C]
+        q, k, v = reshape(q), reshape(k), reshape(v)
 
-        # scaled dot-product attention
-        scale = C ** -0.5
-        attn = torch.softmax((q @ k.transpose(-2, -1)) * scale, dim=-1)  # [B, HW, HW]
-        out = attn @ v                                                   # [B, HW, C]
+        # Use PyTorch's optimized attention (FlashAttention when available)
+        out = F.scaled_dot_product_attention(q, k, v)  # [B, heads, HW, head_dim]
 
-        out = out.transpose(1, 2).reshape(B, C, H, W)
-        out = self.proj_out(out)
+        # Reshape back
+        out = out.transpose(2, 3).reshape(B, C, H, W)
+        out = self.proj(out)
 
         return x + out
-    
-class TimeEmbedding(nn.Module):
-    def __init__(self, time_dim):
-        super().__init__()
-        self.dim = time_dim
-        self.mlp = nn.Sequential(
-            nn.Linear(time_dim, time_dim*4),
-            nn.SiLU(),
-            nn.Linear(time_dim*4, time_dim)
-        )
 
-    def forward(self, t):
-        half = self.dim // 2
-        device = t.device
-        freqs = torch.exp(
-            -torch.arange(half, device=device) * (math.log(10000) / (half - 1))
-        )
-        args = t.float().unsqueeze(1) * freqs.unsqueeze(0)
-        emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
-        out = self.mlp(emb)
-        return out
-    
-class AttnBlock(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.attn = SelfAttention2d(channels)
 
-    def forward(self, x, t_emb=None):
-        return self.attn(x)
-    
 class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, time_dim, groups=8):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.time_dim = time_dim
+    """
+    Residual block with time conditioning.
 
+    Architecture:
+        norm1 → act → conv1 → (+time_emb) → norm2 → act → dropout → conv2 → (+skip)
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        time_dim: int,
+        groups: int = 8,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+
+        self.norm1 = nn.GroupNorm(groups, in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.norm1 = nn.GroupNorm(groups, out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+
+        self.time_mlp = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(time_dim, out_channels),
+        )
+
         self.norm2 = nn.GroupNorm(groups, out_channels)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+
         self.act = nn.SiLU()
 
-        self.time_proj = nn.Linear(time_dim, out_channels)
-        self.downsample = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False) if in_channels != out_channels else None
+        # Skip connection
+        if in_channels != out_channels:
+            self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        else:
+            self.skip = nn.Identity()
 
-    def forward(self, x, time_emb):
-        out = self.conv1(x)
-        out = self.norm1(out)
-        out = self.act(out)
-        out = out + self.time_proj(time_emb).unsqueeze(-1).unsqueeze(-1)
-        out = self.conv2(out)
-        out = self.norm2(out)
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
+        h = self.norm1(x)
+        h = self.act(h)
+        h = self.conv1(h)
+
+        # Add time embedding
+        h = h + self.time_mlp(t_emb)[:, :, None, None]
+
+        h = self.norm2(h)
+        h = self.act(h)
+        h = self.dropout(h)
+        h = self.conv2(h)
+
+        return h + self.skip(x)
+
+
+class DownBlock(nn.Module):
+    """Encoder block: ResBlocks → optional attention → downsample."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        time_dim: int,
+        num_blocks: int = 2,
+        groups: int = 8,
+        dropout: float = 0.0,
+        use_attn: bool = False,
+        downsample: bool = True,
+    ):
+        super().__init__()
+
+        self.blocks = nn.ModuleList()
+        self.attns = nn.ModuleList()
+
+        for i in range(num_blocks):
+            ch_in = in_channels if i == 0 else out_channels
+            self.blocks.append(ResBlock(ch_in, out_channels, time_dim, groups, dropout))
+            self.attns.append(
+                SelfAttention2d(out_channels) if use_attn else nn.Identity()
+            )
+
+        if downsample:
+            self.downsample = nn.Conv2d(
+                out_channels, out_channels, 3, stride=2, padding=1
+            )
+        else:
+            self.downsample = None
+
+    def forward(
+        self, x: torch.Tensor, t_emb: torch.Tensor
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        """Returns (skip_connections, downsampled_output)."""
+        skips = []
+
+        for block, attn in zip(self.blocks, self.attns):
+            x = block(x, t_emb)
+            x = attn(x)
+            skips.append(x)
 
         if self.downsample is not None:
             x = self.downsample(x)
 
-        return self.act(out + x)
+        return skips, x
 
-
-class DownBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, time_dim, num_blocks=1, groups=8, use_attn=False):
-        super().__init__()
-        blocks = [ResBlock(in_channels, out_channels, time_dim, groups=groups)]
-        for _ in range(1, num_blocks):
-            blocks.append(ResBlock(out_channels, out_channels, time_dim, groups=groups))
-        self.blocks = nn.ModuleList(blocks)
-        self.attn = AttnBlock(out_channels) if use_attn else None
-        self.downsample = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=2, padding=1)
-
-    def forward(self, x, t_emb):
-        for block in self.blocks:
-            x = block(x, t_emb)
-        if self.attn is not None:
-            x = self.attn(x)
-        h_down = self.downsample(x)
-        return x, h_down
-    
 
 class UpBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, skip_channels, time_dim, num_blocks=1, groups=8, use_attn=False):
+    """Decoder block: upsample → concat skip → ResBlocks → optional attention."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        skip_channels: int,
+        time_dim: int,
+        num_blocks: int = 2,
+        groups: int = 8,
+        dropout: float = 0.0,
+        use_attn: bool = False,
+        upsample: bool = True,
+    ):
         super().__init__()
-        self.upsample = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        )
 
-        blocks = [ResBlock(out_channels + skip_channels, out_channels, time_dim, groups=groups)]
-        for _ in range(1, num_blocks):
-            blocks.append(ResBlock(out_channels, out_channels, time_dim, groups=groups))
-        self.blocks = nn.ModuleList(blocks)
-        self.attn = AttnBlock(out_channels) if use_attn else None
+        if upsample:
+            self.upsample = nn.Sequential(
+                nn.Upsample(scale_factor=2, mode="nearest"),
+                nn.Conv2d(in_channels, in_channels, 3, padding=1),
+            )
+        else:
+            self.upsample = None
 
-    def forward(self, x, skip, t_emb):
-        x = self.upsample(x)
-        x = torch.cat((x, skip), dim=1)
-        for block in self.blocks:
+        self.blocks = nn.ModuleList()
+        self.attns = nn.ModuleList()
+
+        for i in range(num_blocks):
+            # First block takes concatenated skip connection
+            if i == 0:
+                ch_in = in_channels + skip_channels
+            else:
+                ch_in = out_channels
+            self.blocks.append(ResBlock(ch_in, out_channels, time_dim, groups, dropout))
+            self.attns.append(
+                SelfAttention2d(out_channels) if use_attn else nn.Identity()
+            )
+
+    def forward(
+        self, x: torch.Tensor, skips: list[torch.Tensor], t_emb: torch.Tensor
+    ) -> torch.Tensor:
+        if self.upsample is not None:
+            x = self.upsample(x)
+
+        for i, (block, attn) in enumerate(zip(self.blocks, self.attns)):
+            # Concatenate with corresponding skip connection
+            skip = skips[-(i + 1)]
+            x = torch.cat([x, skip], dim=1) if i == 0 else x
             x = block(x, t_emb)
-        if self.attn is not None:
-            x = self.attn(x)
+            x = attn(x)
+
         return x
 
 
 class UNet(nn.Module):
-    def __init__(self, ch, time_dim, groups=8, use_attn=False, use_bottleneck_attn=False):
+    """
+    U-Net for diffusion models.
+
+    Architecture:
+        - Input conv
+        - Encoder: series of DownBlocks
+        - Bottleneck: ResBlocks with optional attention
+        - Decoder: series of UpBlocks with skip connections
+        - Output conv
+
+    Time conditioning is injected into every ResBlock.
+    """
+
+    def __init__(
+        self, config: ModelConfig, in_channels: int = 3, out_channels: int = 3
+    ):
         super().__init__()
+        self.config = config
+
+        ch = config.channels
+        time_dim = config.time_dim
+        groups = config.groups
+        mults = config.channel_mults
+        n_res = config.num_res_blocks
+        dropout = config.dropout
+
+        # Time embedding
         self.time_emb = TimeEmbedding(time_dim)
-        self.stem = ResBlock(3, ch, time_dim, groups=groups)
-        self.down_blocks = nn.ModuleList([DownBlock(ch, 2*ch, time_dim, groups=groups), DownBlock(2*ch, 4*ch, time_dim, groups=groups, use_attn=use_attn)])
 
-        bottleneck = [ResBlock(4*ch, 4*ch, time_dim, groups=groups)]
-        if use_bottleneck_attn: bottleneck.append(AttnBlock(4*ch))
-        self.bottleneck = nn.ModuleList(bottleneck)
+        # Input projection
+        self.input_conv = nn.Conv2d(in_channels, ch, 3, padding=1)
 
-        self.up_blocks = nn.ModuleList([UpBlock(4*ch, 2*ch, 4*ch, time_dim, groups=groups, use_attn=use_attn), UpBlock(2*ch, ch, 2*ch, time_dim, groups=groups)])
-        self.proj = nn.Conv2d(ch, 3, kernel_size=3, padding=1)
+        # Encoder
+        self.down_blocks = nn.ModuleList()
+        ch_list = [ch]  # Track channel sizes for skip connections
 
-    def forward(self, x, t):
+        current_ch = ch
+        current_res = 32  # Assuming 32x32 input (CIFAR-10)
+
+        for i, mult in enumerate(mults):
+            out_ch = ch * mult
+            use_attn = current_res in config.attn_resolutions
+            is_last = i == len(mults) - 1
+
+            self.down_blocks.append(
+                DownBlock(
+                    in_channels=current_ch,
+                    out_channels=out_ch,
+                    time_dim=time_dim,
+                    num_blocks=n_res,
+                    groups=groups,
+                    dropout=dropout,
+                    use_attn=use_attn,
+                    downsample=not is_last,
+                )
+            )
+
+            ch_list.extend([out_ch] * n_res)
+            current_ch = out_ch
+            if not is_last:
+                current_res //= 2
+
+        # Bottleneck
+        self.mid_block1 = ResBlock(current_ch, current_ch, time_dim, groups, dropout)
+        self.mid_attn = (
+            SelfAttention2d(current_ch) if config.use_bottleneck_attn else nn.Identity()
+        )
+        self.mid_block2 = ResBlock(current_ch, current_ch, time_dim, groups, dropout)
+
+        # Decoder
+        self.up_blocks = nn.ModuleList()
+
+        for i, mult in enumerate(reversed(mults)):
+            out_ch = ch * mult
+
+            # Skip channels from encoder at this level
+            skip_ch = out_ch  # Matches the ResBlock output channels
+
+            # Previous level's channels (or bottleneck for first up block)
+            if i == 0:
+                in_ch = current_ch
+            else:
+                prev_mult = list(reversed(mults))[i - 1]
+                in_ch = ch * prev_mult
+
+            use_attn = current_res in config.attn_resolutions
+            is_last = i == len(mults) - 1
+            final_out_ch = ch if is_last else out_ch
+
+            self.up_blocks.append(
+                UpBlock(
+                    in_channels=in_ch,
+                    out_channels=final_out_ch,
+                    skip_channels=skip_ch,
+                    time_dim=time_dim,
+                    num_blocks=n_res,
+                    groups=groups,
+                    dropout=dropout,
+                    use_attn=use_attn,
+                    upsample=not (i == 0),  # Don't upsample on first up block
+                )
+            )
+
+            current_ch = final_out_ch
+            if not (i == 0):
+                current_res *= 2
+
+        # Output projection
+        self.output_norm = nn.GroupNorm(groups, ch)
+        self.output_conv = nn.Conv2d(ch, out_channels, 3, padding=1)
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        # Time embedding
         t_emb = self.time_emb(t)
-        x = self.stem(x, t_emb)
 
-        skips = []
+        # Input
+        x = self.input_conv(x)
+
+        # Encoder - collect all skip connections
+        all_skips = []
         for block in self.down_blocks:
-            skip, x = block(x, t_emb)
-            skips.append(skip)
+            skips, x = block(x, t_emb)
+            all_skips.extend(skips)
 
-        for block in self.bottleneck:
-            x = block(x, t_emb)
+        # Bottleneck
+        x = self.mid_block1(x, t_emb)
+        x = self.mid_attn(x)
+        x = self.mid_block2(x, t_emb)
 
-        for i, block in enumerate(self.up_blocks):
-            x = block(x, skips[-(i+1)], t_emb)
+        # Decoder - use skip connections in reverse order
+        skip_idx = len(all_skips)
+        for block in self.up_blocks:
+            n_skips = len(block.blocks)
+            block_skips = all_skips[skip_idx - n_skips : skip_idx]
+            skip_idx -= n_skips
+            x = block(x, block_skips, t_emb)
 
-        return self.proj(x)
+        # Output
+        x = self.output_norm(x)
+        x = nn.functional.silu(x)
+        x = self.output_conv(x)
+
+        return x
+
+
+def count_parameters(model: nn.Module) -> int:
+    """Count trainable parameters."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)

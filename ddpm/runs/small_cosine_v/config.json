@@ -1,0 +1,43 @@
+{
+  "model": {
+    "channels": 64,
+    "channel_mults": [
+      1,
+      2,
+      4
+    ],
+    "time_dim": 128,
+    "groups": 8,
+    "num_res_blocks": 2,
+    "attn_resolutions": [
+      16
+    ],
+    "use_bottleneck_attn": true,
+    "dropout": 0.0
+  },
+  "diffusion": {
+    "T": 200,
+    "beta_start": 0.0001,
+    "beta_end": 0.02,
+    "schedule_type": "cosine",
+    "pred_type": "v",
+    "cosine_s": 0.008
+  },
+  "train": {
+    "batch_size": 512,
+    "num_workers": 16,
+    "epochs": 100,
+    "lr": 0.0003,
+    "weight_decay": 0.0,
+    "grad_clip": 1.0,
+    "ema_decay": 0.9999,
+    "log_every": 50,
+    "sample_every": 1,
+    "save_every": 10,
+    "num_samples": 16
+  },
+  "run_name": "small_cosine_v",
+  "seed": 42,
+  "data_dir": "./data",
+  "log_dir": "./runs"
+}
