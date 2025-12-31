@@ -17,9 +17,13 @@ import math
 import time
 from dataclasses import dataclass, asdict
 from typing import Optional
+import sys
+from pathlib import Path
 
-from model import GPT, GPTConfig, GenerationEngine
-from diagnostics import TrainingDiagnostics, detect_anomalies
+sys.path.append(str(Path(__file__).parent.parent))
+
+from gpt.model import GPT, GPTConfig, GenerationEngine
+from gpt.diagnostics import TrainingDiagnostics, detect_anomalies
 
 
 @dataclass

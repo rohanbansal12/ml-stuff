@@ -14,8 +14,11 @@ import torch.nn.functional as F
 import argparse
 from dataclasses import dataclass
 from typing import Dict, Tuple
+import sys
+from pathlib import Path
 
-from model import GPT, GPTConfig
+sys.path.append(str(Path(__file__).parent.parent))
+from gpt.model import GPT, GPTConfig
 
 
 @dataclass

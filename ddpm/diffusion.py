@@ -290,7 +290,6 @@ class DDPMSampler:
         return x_t
 
 
-# TODO: Add DDIMSampler for faster sampling
 class DDIMSampler:
     """
     DDIM sampler for accelerated sampling.

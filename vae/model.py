@@ -20,8 +20,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple
 from dataclasses import dataclass
+import sys
+from pathlib import Path
 
-from config import VAEModelConfig
+sys.path.append(str(Path(__file__).parent.parent))
+from vae.config import VAEModelConfig
 
 
 @dataclass

@@ -1,9 +1,10 @@
 {
   "model": {
-    "channels": 64,
+    "channels": 128,
     "channel_mults": [
       1,
       2,
+      4,
       4
     ],
     "latent_dim": 128,
@@ -13,23 +14,23 @@
     "use_spatial_latent": true
   },
   "train": {
-    "batch_size": 128,
-    "num_workers": 4,
-    "epochs": 50,
-    "lr": 0.001,
+    "batch_size": 512,
+    "num_workers": 12,
+    "epochs": 100,
+    "lr": 0.004,
     "weight_decay": 0.0,
-    "kl_weight": 1.0,
+    "kl_weight": 0.01,
     "kl_warmup_epochs": 10,
     "recon_loss": "mse",
     "log_every": 50,
     "sample_every": 5,
     "save_every": 20,
     "num_samples": 16,
-    "mixed_precision": "no",
-    "compile_model": false,
+    "mixed_precision": "bf16",
+    "compile_model": true,
     "tf32": true
   },
-  "run_name": "small",
+  "run_name": "fast_kl=0.01",
   "seed": 42,
   "data_dir": "./data",
   "log_dir": "./runs"

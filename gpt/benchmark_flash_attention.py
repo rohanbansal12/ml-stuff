@@ -17,8 +17,12 @@ import argparse
 import time
 from typing import Dict, Callable
 from dataclasses import dataclass
+import sys
+from pathlib import Path
 
-from model import (
+sys.path.append(str(Path(__file__).parent.parent))
+
+from gpt.model import (
     GPTConfig,
     GPT,
     FlashAttentionNaive,

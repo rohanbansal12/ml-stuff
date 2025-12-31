@@ -14,7 +14,8 @@ ckpts/
 .vscode/
 .venv/
 ddpm/data/
-VAE/data/
+vae/data/
+latent_diffusion/data/
 
 # Distribution / packaging
 .Python

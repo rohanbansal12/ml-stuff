@@ -14,12 +14,12 @@
     "use_spatial_latent": true
   },
   "train": {
-    "batch_size": 256,
-    "num_workers": 8,
-    "epochs": 100,
-    "lr": 0.001,
+    "batch_size": 512,
+    "num_workers": 12,
+    "epochs": 50,
+    "lr": 0.004,
     "weight_decay": 0.0,
-    "kl_weight": 0.5,
+    "kl_weight": 0.0001,
     "kl_warmup_epochs": 10,
     "recon_loss": "mse",
     "log_every": 50,

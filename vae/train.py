@@ -14,10 +14,12 @@ from datetime import datetime
 import argparse
 from typing import Optional
 from contextlib import nullcontext
+import sys
 
-from config import VAEConfig, VAE_PRESETS
-from model import VAE, vae_loss, count_parameters
-from data import get_dataloaders
+sys.path.append(str(Path(__file__).parent.parent))
+from vae.config import VAEConfig, VAE_PRESETS
+from vae.model import VAE, vae_loss, count_parameters
+from vae.data import get_dataloaders
 
 
 def train_one_epoch(
@@ -175,26 +177,26 @@ def main():
     else:
         config = VAEConfig()
 
-    # Apply overrides
-    if args.run_name:
+    # Apply overrides (use `is not None` to allow 0 values)
+    if args.run_name is not None:
         config.run_name = args.run_name
-    if args.epochs:
+    if args.epochs is not None:
         config.train.epochs = args.epochs
-    if args.batch_size:
+    if args.batch_size is not None:
         config.train.batch_size = args.batch_size
-    if args.lr:
+    if args.lr is not None:
         config.train.lr = args.lr
-    if args.kl_weight:
+    if args.kl_weight is not None:
         config.train.kl_weight = args.kl_weight
-    if args.latent_channels:
+    if args.latent_channels is not None:
         config.model.latent_channels = args.latent_channels
-    if args.channels:
+    if args.channels is not None:
         config.model.channels = args.channels
-    if args.mixed_precision:
+    if args.mixed_precision is not None:
         config.train.mixed_precision = args.mixed_precision
     if args.compile:
         config.train.compile_model = True
-    if args.num_workers:
+    if args.num_workers is not None:
         config.train.num_workers = args.num_workers
 
     # Setup
