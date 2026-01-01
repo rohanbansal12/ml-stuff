@@ -300,14 +300,21 @@ class DDPMSampler:
     Implements the standard DDPM reverse process, sampling from p(z_{t-1} | z_t)
     at each timestep from T-1 down to 0.
 
+    Supports classifier-free guidance (CFG) for conditional models.
+
     Attributes:
         schedule: Noise schedule with precomputed coefficients.
         pred_type: Prediction parameterization ("eps", "x0", or "v").
         clip_denoised: Whether to clip predicted z_0 to [-1, 1].
+        guidance_scale: CFG scale. 0 = no guidance, >0 = use CFG.
     """
 
     def __init__(
-        self, schedule: NoiseSchedule, pred_type: str, clip_denoised: bool = False
+        self,
+        schedule: NoiseSchedule,
+        pred_type: str,
+        clip_denoised: bool = False,
+        guidance_scale: float = 0.0,
     ):
         """
         Initialize DDPM sampler.
@@ -316,28 +323,40 @@ class DDPMSampler:
             schedule: Noise schedule containing precomputed coefficients.
             pred_type: One of "eps", "x0", or "v".
             clip_denoised: Whether to clip z0_pred. Usually False for latents.
+            guidance_scale: CFG scale. 0 = disabled, typical values 3-8.
         """
         self.schedule = schedule
         self.pred_type = pred_type
         self.clip_denoised = clip_denoised
+        self.guidance_scale = guidance_scale
 
     @torch.no_grad()
-    def step(self, model: nn.Module, z_t: torch.Tensor, t: int) -> torch.Tensor:
+    def step(
+        self,
+        model: nn.Module,
+        z_t: torch.Tensor,
+        t: int,
+        class_labels: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Single reverse diffusion step from t to t-1.
 
         Samples from the reverse posterior p_θ(z_{t-1} | z_t) using the
-        model's noise prediction.
+        model's noise prediction. Supports classifier-free guidance.
 
         Math:
             μ_θ(z_t, t) = (1/√α_t) · (z_t - β_t · ε̂_θ / √(1-ᾱ_t))
             z_{t-1} = μ_θ + √β̃_t · ε,  where ε ~ N(0, I) for t > 0
             z_{t-1} = μ_θ               for t = 0
 
+        With CFG:
+            ε̂ = ε_uncond + guidance_scale · (ε_cond - ε_uncond)
+
         Args:
             model: Denoising model that predicts noise/x0/v given (z_t, t).
             z_t: Current noisy latent, shape (B, C, H, W).
             t: Current timestep (integer).
+            class_labels: Optional class labels for conditional generation.
 
         Returns:
             Denoised latent z_{t-1}, same shape as z_t.
@@ -345,7 +364,25 @@ class DDPMSampler:
         batch_size = z_t.size(0)
         t_tensor = torch.full((batch_size,), t, device=z_t.device, dtype=torch.long)
 
-        model_out = model(z_t, t_tensor)
+        # Get model prediction (with optional CFG)
+        if self.guidance_scale > 0 and class_labels is not None:
+            # Classifier-free guidance: run model twice
+            # Conditional prediction
+            model_out_cond = model(
+                z_t, t_tensor, class_labels=class_labels, drop_class=False
+            )
+            # Unconditional prediction
+            model_out_uncond = model(
+                z_t, t_tensor, class_labels=class_labels, drop_class=True
+            )
+            # CFG combination
+            model_out = model_out_uncond + self.guidance_scale * (
+                model_out_cond - model_out_uncond
+            )
+        else:
+            # No guidance - single forward pass
+            model_out = model(z_t, t_tensor, class_labels=class_labels)
+
         z0_pred, eps_pred = predict_z0_from_output(
             model_out, z_t, t_tensor, self.schedule, self.pred_type, self.clip_denoised
         )
@@ -380,6 +417,7 @@ class DDPMSampler:
         shape: tuple,
         device: torch.device,
         z_T: Optional[torch.Tensor] = None,
+        class_labels: Optional[torch.Tensor] = None,
         progress: bool = False,
     ) -> torch.Tensor:
         """
@@ -392,6 +430,7 @@ class DDPMSampler:
             shape: Shape of latent to generate, e.g., (B, 4, 8, 8).
             device: Device to run sampling on.
             z_T: Optional starting noise. If None, sampled from N(0, I).
+            class_labels: Optional class labels for conditional generation.
             progress: Whether to show tqdm progress bar.
 
         Returns:
@@ -406,7 +445,7 @@ class DDPMSampler:
             timesteps = tqdm(timesteps, desc="DDPM Sampling")
 
         for t in timesteps:
-            z_t = self.step(model, z_t=z_t, t=t)
+            z_t = self.step(model, z_t=z_t, t=t, class_labels=class_labels)
 
         return z_t
 

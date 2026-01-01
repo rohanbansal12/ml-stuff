@@ -16,6 +16,9 @@ This is the core idea behind Stable Diffusion and similar models.
 Usage:
     python train_latent.py --preset base --vae-checkpoint /path/to/vae.pt
     python train_latent.py --preset fast --vae-checkpoint /path/to/vae.pt --epochs 100
+
+    # With classifier-free guidance:
+    python train_latent.py --preset fast --vae-checkpoint /path/to/vae.pt --num-classes 10 --guidance-scale 5.0
 """
 
 import torch
@@ -307,6 +310,7 @@ def train_one_epoch(
     num_batches = len(train_loader)
     pred_type = config.diffusion.pred_type
     latent_scale = config.latent_scale
+    use_cfg = config.model.num_classes > 0
 
     autocast_ctx = (
         torch.amp.autocast(device_type="cuda", dtype=autocast_dtype)
@@ -314,8 +318,9 @@ def train_one_epoch(
         else nullcontext()
     )
 
-    for step, (images, _) in enumerate(train_loader):
+    for step, (images, labels) in enumerate(train_loader):
         images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True) if use_cfg else None
 
         # Encode images to latents (no grad - VAE is frozen)
         with torch.no_grad():
@@ -339,7 +344,7 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         with autocast_ctx:
-            pred = model(z_t, t)
+            pred = model(z_t, t, class_labels=labels)
             loss = F.mse_loss(pred, target)
 
         # Backward pass with optional gradient scaling
@@ -387,6 +392,7 @@ def generate_samples(
     device: torch.device,
     num_samples: int = 16,
     z_T: Optional[torch.Tensor] = None,
+    class_labels: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Generate image samples via latent diffusion.
@@ -406,6 +412,8 @@ def generate_samples(
         device: Device to run sampling on.
         num_samples: Number of images to generate.
         z_T: Optional starting noise. If None, sampled from N(0, I).
+        class_labels: Optional class labels for conditional generation.
+            If None and model is conditional, random classes are used.
 
     Returns:
         Generated images, shape (num_samples, 3, H, W), range [0, 1].
@@ -415,9 +423,20 @@ def generate_samples(
 
     latent_shape = (num_samples, *config.latent_shape)
 
+    # Generate random class labels if conditional but none provided
+    if config.model.num_classes > 0 and class_labels is None:
+        class_labels = torch.randint(
+            0, config.model.num_classes, (num_samples,), device=device
+        )
+
     # Run reverse diffusion in latent space
     z_0 = sampler.sample(
-        model=model, shape=latent_shape, device=device, z_T=z_T, progress=False
+        model=model,
+        shape=latent_shape,
+        device=device,
+        z_T=z_T,
+        class_labels=class_labels,
+        progress=False,
     )
 
     # Unscale latent (inverse of training scaling)
@@ -532,6 +551,23 @@ def main():
     parser.add_argument("--pred-type", type=str, choices=["eps", "x0", "v"])
     parser.add_argument("--schedule", type=str, choices=["linear", "cosine"])
 
+    # Classifier-free guidance
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        help="Number of classes (0=unconditional, 10 for CIFAR-10)",
+    )
+    parser.add_argument(
+        "--cfg-dropout",
+        type=float,
+        help="Class dropout rate for CFG training (default 0.1)",
+    )
+    parser.add_argument(
+        "--guidance-scale",
+        type=float,
+        help="CFG scale at sampling (0=disabled, try 3-7)",
+    )
+
     # Performance
     parser.add_argument("--mixed-precision", type=str, choices=["no", "fp16", "bf16"])
     parser.add_argument("--compile", action="store_true")
@@ -565,6 +601,12 @@ def main():
         config.diffusion.pred_type = args.pred_type
     if args.schedule is not None:
         config.diffusion.schedule_type = args.schedule
+    if args.num_classes is not None:
+        config.model.num_classes = args.num_classes
+    if args.cfg_dropout is not None:
+        config.model.cfg_dropout = args.cfg_dropout
+    if args.guidance_scale is not None:
+        config.train.guidance_scale = args.guidance_scale
     if args.mixed_precision is not None:
         config.train.mixed_precision = args.mixed_precision
     if args.compile:
@@ -634,6 +676,12 @@ def main():
     num_params = count_parameters(model)
     print(f"\nLatent U-Net parameters: {num_params:,}")
 
+    if config.model.num_classes > 0:
+        print(
+            f"Class-conditional model: {config.model.num_classes} classes, CFG dropout: {config.model.cfg_dropout}"
+        )
+        print(f"Guidance scale at sampling: {config.train.guidance_scale}")
+
     if config.train.compile_model:
         print("Compiling model with torch.compile()...")
         model = torch.compile(model)
@@ -649,7 +697,11 @@ def main():
 
     # Create noise schedule and sampler
     schedule = NoiseSchedule(config.diffusion, device)
-    sampler = DDPMSampler(schedule, config.diffusion.pred_type)
+    sampler = DDPMSampler(
+        schedule,
+        config.diffusion.pred_type,
+        guidance_scale=config.train.guidance_scale,
+    )
 
     # Setup optimizer
     optimizer = torch.optim.AdamW(
@@ -683,6 +735,15 @@ def main():
     fixed_z_T = torch.randn(
         config.train.num_samples, *config.latent_shape, device=device
     )
+
+    # Fixed class labels for visualization (one of each class if conditional)
+    if config.model.num_classes > 0:
+        fixed_class_labels = (
+            torch.arange(config.train.num_samples, device=device)
+            % config.model.num_classes
+        )
+    else:
+        fixed_class_labels = None
 
     print(f"\nStarting training: {run_name}")
     print(f"Logging to: {log_dir}")
@@ -722,6 +783,7 @@ def main():
                 device=device,
                 num_samples=config.train.num_samples,
                 z_T=fixed_z_T,
+                class_labels=fixed_class_labels,
             )
             grid = torchvision.utils.make_grid(samples, nrow=4)
             writer.add_image("samples", grid, epoch)

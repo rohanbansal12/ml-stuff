@@ -14,11 +14,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-import sys
-from pathlib import Path
+from typing import Optional
 
-sys.path.append(str(Path(__file__).parent.parent))
-from latent_diffusion.config import LatentUNetConfig
+from config import LatentUNetConfig
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -242,11 +240,14 @@ class LatentUNet(nn.Module):
     U-Net for latent diffusion.
 
     Designed for small spatial inputs (e.g., 8x8) from VAE encoder.
+    Supports optional class conditioning for classifier-free guidance.
     """
 
     def __init__(self, config: LatentUNetConfig):
         super().__init__()
         self.config = config
+        self.num_classes = config.num_classes
+        self.cfg_dropout = config.cfg_dropout
 
         ch = config.channels
         time_dim = config.time_dim
@@ -257,6 +258,14 @@ class LatentUNet(nn.Module):
 
         # Time embedding
         self.time_emb = TimeEmbedding(time_dim)
+
+        # Class embedding (if conditional)
+        if self.num_classes > 0:
+            # +1 for the unconditional/null class token
+            self.class_emb = nn.Embedding(self.num_classes + 1, time_dim)
+            self.null_class_idx = self.num_classes  # Last index is null token
+        else:
+            self.class_emb = None
 
         # Input projection
         self.input_conv = nn.Conv2d(config.in_channels, ch, 3, padding=1)
@@ -337,9 +346,46 @@ class LatentUNet(nn.Module):
         self.output_norm = nn.GroupNorm(groups, ch)
         self.output_conv = nn.Conv2d(ch, config.out_channels, 3, padding=1)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        class_labels: Optional[torch.Tensor] = None,
+        drop_class: bool = False,
+    ) -> torch.Tensor:
+        """
+        Forward pass with optional class conditioning.
+
+        Args:
+            x: Noisy latent, shape (B, C, H, W).
+            t: Timesteps, shape (B,).
+            class_labels: Optional class labels, shape (B,). Required if num_classes > 0.
+            drop_class: If True, use null class (for CFG unconditional pass).
+
+        Returns:
+            Predicted noise/x0/v, same shape as x.
+        """
         # Time embedding
         t_emb = self.time_emb(t)
+
+        # Add class embedding if conditional
+        if self.class_emb is not None:
+            if class_labels is None:
+                raise ValueError("class_labels required for conditional model")
+
+            if drop_class:
+                # Use null class for unconditional generation
+                class_labels = torch.full_like(class_labels, self.null_class_idx)
+            elif self.training and self.cfg_dropout > 0:
+                # Randomly drop classes during training for CFG
+                drop_mask = (
+                    torch.rand(class_labels.shape[0], device=class_labels.device)
+                    < self.cfg_dropout
+                )
+                class_labels = torch.where(drop_mask, self.null_class_idx, class_labels)
+
+            c_emb = self.class_emb(class_labels)
+            t_emb = t_emb + c_emb
 
         # Input
         x = self.input_conv(x)

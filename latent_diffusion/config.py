@@ -33,6 +33,10 @@ class LatentUNetConfig:
     use_bottleneck_attn: bool = True
     dropout: float = 0.0
 
+    # Classifier-free guidance settings
+    num_classes: int = 0  # 0 = unconditional, >0 = class-conditional
+    cfg_dropout: float = 0.1  # Probability of dropping class label during training
+
 
 @dataclass
 class LatentDiffusionConfig:
@@ -68,6 +72,9 @@ class LatentTrainConfig:
     mixed_precision: Literal["no", "fp16", "bf16"] = "bf16"
     compile_model: bool = False
     tf32: bool = True
+
+    # Classifier-free guidance
+    guidance_scale: float = 0.0  # 0 = no guidance, >0 = use CFG at sampling
 
 
 @dataclass
