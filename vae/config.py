@@ -20,18 +20,37 @@ class VAEModelConfig:
 
 
 @dataclass
+class DiscriminatorConfig:
+    """PatchGAN discriminator configuration."""
+    channels: int = 64                      # Base channel count
+    n_layers: int = 3                       # Number of conv layers
+    use_spectral_norm: bool = True          # Spectral normalization for stability
+
+
+@dataclass
 class VAETrainConfig:
     """VAE training configuration."""
     batch_size: int = 128
     num_workers: int = 4
     epochs: int = 100
-    lr: float = 1e-3
+    lr: float = 1e-4                        # Reduced from 1e-3 for GAN stability
     weight_decay: float = 0.0
     
     # VAE-specific
     kl_weight: float = 1.0                  # β in β-VAE
     kl_warmup_epochs: int = 10              # Linear warmup for KL weight
     recon_loss: Literal["mse", "l1"] = "mse"
+    
+    # Perceptual loss (LPIPS)
+    use_lpips: bool = False                 # Enable LPIPS perceptual loss
+    lpips_weight: float = 0.1               # Weight for LPIPS loss
+    
+    # Adversarial loss (GAN)
+    use_adversarial: bool = False           # Enable adversarial training
+    adv_weight: float = 0.1                 # Weight for adversarial loss
+    adv_start_epoch: int = 0                # Epoch to start adversarial training
+    disc_lr: float = 1e-4                   # Discriminator learning rate
+    disc_steps: int = 1                     # Discriminator steps per generator step
     
     # Logging
     log_every: int = 50
@@ -49,6 +68,7 @@ class VAETrainConfig:
 class VAEConfig:
     """Master VAE configuration."""
     model: VAEModelConfig = field(default_factory=VAEModelConfig)
+    discriminator: DiscriminatorConfig = field(default_factory=DiscriminatorConfig)
     train: VAETrainConfig = field(default_factory=VAETrainConfig)
     
     # Experiment metadata
@@ -67,6 +87,7 @@ class VAEConfig:
             data = json.load(f)
         return cls(
             model=VAEModelConfig(**data["model"]),
+            discriminator=DiscriminatorConfig(**data.get("discriminator", {})),
             train=VAETrainConfig(**data["train"]),
             run_name=data.get("run_name"),
             seed=data.get("seed", 42),
@@ -75,6 +96,7 @@ class VAEConfig:
         )
 
 
+# Presets
 VAE_PRESETS = {
     "tiny": VAEConfig(
         model=VAEModelConfig(channels=32, channel_mults=(1, 2), num_res_blocks=1, latent_channels=2),
@@ -89,13 +111,31 @@ VAE_PRESETS = {
         train=VAETrainConfig(epochs=100, kl_weight=0.5),
     ),
     "fast": VAEConfig(
-        model=VAEModelConfig(channels=128, channel_mults=(1, 2, 4, 4), latent_channels=4),
+        model=VAEModelConfig(channels=128, channel_mults=(1, 2, 4), latent_channels=4),
         train=VAETrainConfig(
-            epochs=100,
+            epochs=200,
             mixed_precision="bf16",
             compile_model=True,
             batch_size=256,
             num_workers=8,
+        ),
+    ),
+    # New preset with perceptual + adversarial loss
+    "sharp": VAEConfig(
+        model=VAEModelConfig(channels=128, channel_mults=(1, 2, 4), latent_channels=4),
+        discriminator=DiscriminatorConfig(channels=64, n_layers=3),
+        train=VAETrainConfig(
+            epochs=400,
+            lr=1e-4,
+            kl_weight=0.001,
+            use_lpips=True,
+            lpips_weight=0.1,
+            use_adversarial=True,
+            adv_weight=0.1,
+            adv_start_epoch=5,  # Let VAE warm up first
+            mixed_precision="bf16",
+            batch_size=512,
+            num_workers=12,
         ),
     ),
 }

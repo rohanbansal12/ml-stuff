@@ -474,6 +474,7 @@ class DDIMSampler:
         num_inference_steps: int = 50,
         eta: float = 0.0,
         clip_denoised: bool = False,
+        guidance_scale: float = 0.0,
     ):
         """
         Initialize DDIM sampler.
@@ -484,11 +485,13 @@ class DDIMSampler:
             num_inference_steps: Number of denoising steps (can be << T).
             eta: Stochasticity parameter in [0, 1].
             clip_denoised: Whether to clip z0_pred. Usually False for latents.
+            guidance_scale: CFG scale. 0 = disabled, typical values 3-8.
         """
         self.schedule = schedule
         self.pred_type = pred_type
         self.eta = eta
         self.clip_denoised = clip_denoised
+        self.guidance_scale = guidance_scale
 
         # Create timestep subsequence (evenly spaced)
         step_ratio = schedule.T // num_inference_steps
@@ -496,7 +499,12 @@ class DDIMSampler:
 
     @torch.no_grad()
     def step(
-        self, model: nn.Module, z_t: torch.Tensor, t: int, t_prev: int
+        self,
+        model: nn.Module,
+        z_t: torch.Tensor,
+        t: int,
+        t_prev: int,
+        class_labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Single DDIM step from timestep t to t_prev.
@@ -515,6 +523,7 @@ class DDIMSampler:
             z_t: Current noisy latent, shape (B, C, H, W).
             t: Current timestep (integer).
             t_prev: Target timestep (integer), typically t - step_size.
+            class_labels: Optional class labels for conditional generation.
 
         Returns:
             Denoised latent at timestep t_prev, same shape as z_t.
@@ -522,7 +531,21 @@ class DDIMSampler:
         batch_size = z_t.size(0)
         t_tensor = torch.full((batch_size,), t, device=z_t.device, dtype=torch.long)
 
-        model_out = model(z_t, t_tensor)
+        # Get model prediction (with optional CFG)
+        if self.guidance_scale > 0 and class_labels is not None:
+            # Classifier-free guidance: run model twice
+            model_out_cond = model(
+                z_t, t_tensor, class_labels=class_labels, drop_class=False
+            )
+            model_out_uncond = model(
+                z_t, t_tensor, class_labels=class_labels, drop_class=True
+            )
+            model_out = model_out_uncond + self.guidance_scale * (
+                model_out_cond - model_out_uncond
+            )
+        else:
+            model_out = model(z_t, t_tensor, class_labels=class_labels)
+
         z0_pred, eps_pred = predict_z0_from_output(
             model_out=model_out,
             z_t=z_t,
@@ -565,6 +588,7 @@ class DDIMSampler:
         shape: tuple,
         device: torch.device,
         z_T: Optional[torch.Tensor] = None,
+        class_labels: Optional[torch.Tensor] = None,
         progress: bool = False,
     ) -> torch.Tensor:
         """
@@ -577,6 +601,7 @@ class DDIMSampler:
             shape: Shape of latent to generate, e.g., (B, 4, 8, 8).
             device: Device to run sampling on.
             z_T: Optional starting noise. If None, sampled from N(0, I).
+            class_labels: Optional class labels for conditional generation.
             progress: Whether to show tqdm progress bar.
 
         Returns:
@@ -595,6 +620,8 @@ class DDIMSampler:
             pairs = tqdm(pairs, desc=f"DDIM Sampling ({len(timesteps)} steps)")
 
         for t, t_prev in pairs:
-            z_t = self.step(model, z_t=z_t, t=t, t_prev=t_prev)
+            z_t = self.step(
+                model, z_t=z_t, t=t, t_prev=t_prev, class_labels=class_labels
+            )
 
         return z_t

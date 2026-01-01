@@ -30,7 +30,7 @@
   "train": {
     "batch_size": 512,
     "num_workers": 12,
-    "epochs": 800,
+    "epochs": 1000,
     "lr": 0.0001,
     "weight_decay": 0.0,
     "grad_clip": 1.0,

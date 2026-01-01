@@ -26,6 +26,9 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 import torchvision
+from torchvision.models import inception_v3, Inception_V3_Weights
+import numpy as np
+from scipy import linalg
 from pathlib import Path
 from datetime import datetime
 import argparse
@@ -38,7 +41,13 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from latent_diffusion.config import LatentDiffusionFullConfig, LATENT_PRESETS
 from latent_diffusion.model import LatentUNet, count_parameters
-from latent_diffusion.diffusion import NoiseSchedule, DDPMSampler, q_sample, get_target
+from latent_diffusion.diffusion import (
+    NoiseSchedule,
+    DDPMSampler,
+    DDIMSampler,
+    q_sample,
+    get_target,
+)
 
 from vae.model import VAE
 from vae.config import VAEConfig
@@ -46,6 +55,170 @@ from vae.config import VAEConfig
 import warnings
 
 warnings.filterwarnings("ignore", message="dtype.*align")
+
+
+# =============================================================================
+# FID Computation
+# =============================================================================
+
+
+class InceptionFeatureExtractor:
+    """
+    Extract features from Inception v3 for FID computation.
+    Uses features from the last pooling layer (2048-dim).
+    """
+
+    def __init__(self, device: torch.device):
+        self.device = device
+
+        # Load pretrained Inception v3
+        self.inception = inception_v3(weights=Inception_V3_Weights.DEFAULT)
+        self.inception.fc = torch.nn.Identity()  # Remove final FC
+        self.inception.eval()
+        self.inception.to(device)
+
+        # Freeze all parameters
+        for param in self.inception.parameters():
+            param.requires_grad = False
+
+    @torch.no_grad()
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Extract features from images.
+
+        Args:
+            x: Images in range [0, 1], shape (B, 3, H, W)
+
+        Returns:
+            features: (B, 2048)
+        """
+        # Inception expects 299x299 images, normalized to [-1, 1]
+        x = F.interpolate(x, size=(299, 299), mode="bilinear", align_corners=False)
+        x = (x - 0.5) / 0.5
+        return self.inception(x)
+
+
+def compute_fid(
+    real_features: np.ndarray, fake_features: np.ndarray, eps: float = 1e-6
+) -> float:
+    """
+    Compute Fréchet Inception Distance between two sets of features.
+
+    FID = ||μ_r - μ_f||² + Tr(Σ_r + Σ_f - 2(Σ_r Σ_f)^{1/2})
+
+    Lower is better. FID = 0 means identical distributions.
+    """
+    mu_real = np.mean(real_features, axis=0)
+    mu_fake = np.mean(fake_features, axis=0)
+    sigma_real = np.cov(real_features, rowvar=False)
+    sigma_fake = np.cov(fake_features, rowvar=False)
+
+    diff = mu_real - mu_fake
+    covmean, _ = linalg.sqrtm(sigma_real @ sigma_fake, disp=False)
+
+    if not np.isfinite(covmean).all():
+        offset = np.eye(sigma_real.shape[0]) * eps
+        covmean = linalg.sqrtm((sigma_real + offset) @ (sigma_fake + offset))
+
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+
+    return float(diff @ diff + np.trace(sigma_real + sigma_fake - 2 * covmean))
+
+
+@torch.no_grad()
+def extract_real_features(
+    dataloader: DataLoader,
+    extractor: InceptionFeatureExtractor,
+    device: torch.device,
+    max_samples: int,
+) -> np.ndarray:
+    """Extract Inception features from real images."""
+    all_features = []
+    num_samples = 0
+
+    for images, _ in dataloader:
+        images = images.to(device)
+        # Ensure [0, 1] range
+        if images.min() < 0:
+            images = (images + 1) / 2
+
+        features = extractor(images)
+        all_features.append(features.cpu().numpy())
+
+        num_samples += images.size(0)
+        if num_samples >= max_samples:
+            break
+
+    return np.concatenate(all_features, axis=0)[:max_samples]
+
+
+@torch.no_grad()
+def compute_fid_score(
+    model: "LatentUNet",
+    vae: VAE,
+    sampler,
+    config: "LatentDiffusionFullConfig",
+    real_features: np.ndarray,
+    extractor: InceptionFeatureExtractor,
+    device: torch.device,
+    num_samples: int = 5000,
+    batch_size: int = 64,
+) -> float:
+    """
+    Generate samples and compute FID against pre-computed real features.
+    """
+    model.eval()
+    vae.eval()
+
+    all_features = []
+    num_generated = 0
+
+    pbar = tqdm(total=num_samples, desc="Computing FID", leave=False)
+
+    while num_generated < num_samples:
+        current_batch = min(batch_size, num_samples - num_generated)
+        latent_shape = (current_batch, *config.latent_shape)
+
+        # Generate class labels if conditional
+        if config.model.num_classes > 0:
+            class_labels = torch.randint(
+                0, config.model.num_classes, (current_batch,), device=device
+            )
+        else:
+            class_labels = None
+
+        # Sample latents
+        z_0 = sampler.sample(
+            model=model,
+            shape=latent_shape,
+            device=device,
+            class_labels=class_labels,
+            progress=False,
+        )
+
+        # Decode to images
+        z_0 = z_0 / config.latent_scale
+        images = vae.decode(z_0)
+        images = (images + 1) / 2  # [-1, 1] -> [0, 1]
+        images = images.clamp(0, 1)
+
+        # Extract features
+        features = extractor(images)
+        all_features.append(features.cpu().numpy())
+
+        num_generated += current_batch
+        pbar.update(current_batch)
+
+    pbar.close()
+
+    fake_features = np.concatenate(all_features, axis=0)[:num_samples]
+    return compute_fid(real_features, fake_features)
+
+
+# =============================================================================
+# Dataset and Training Utilities
+# =============================================================================
 
 
 class LatentDataset(torch.utils.data.Dataset):
@@ -311,6 +484,14 @@ def train_one_epoch(
     pred_type = config.diffusion.pred_type
     latent_scale = config.latent_scale
     use_cfg = config.model.num_classes > 0
+    T = config.diffusion.T
+
+    # Accumulators for timestep-bucketed loss
+    loss_buckets = {
+        "low": [],
+        "mid": [],
+        "high": [],
+    }  # t < T/3, T/3 <= t < 2T/3, t >= 2T/3
 
     autocast_ctx = (
         torch.amp.autocast(device_type="cuda", dtype=autocast_dtype)
@@ -347,21 +528,44 @@ def train_one_epoch(
             pred = model(z_t, t, class_labels=labels)
             loss = F.mse_loss(pred, target)
 
+            # Compute per-sample losses for timestep buckets (no extra forward pass)
+            with torch.no_grad():
+                per_sample_loss = F.mse_loss(pred, target, reduction="none").mean(
+                    dim=(1, 2, 3)
+                )
+                for i, t_val in enumerate(t.tolist()):
+                    if t_val < T // 3:
+                        loss_buckets["low"].append(per_sample_loss[i].item())
+                    elif t_val < 2 * T // 3:
+                        loss_buckets["mid"].append(per_sample_loss[i].item())
+                    else:
+                        loss_buckets["high"].append(per_sample_loss[i].item())
+
         # Backward pass with optional gradient scaling
         if scaler is not None:
             scaler.scale(loss).backward()
             if config.train.grad_clip:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
+                grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), config.train.grad_clip
+                )
+            else:
+                # Compute grad norm even without clipping
+                scaler.unscale_(optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), float("inf")
                 )
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
             if config.train.grad_clip:
-                torch.nn.utils.clip_grad_norm_(
+                grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), config.train.grad_clip
+                )
+            else:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), float("inf")
                 )
             optimizer.step()
 
@@ -379,6 +583,23 @@ def train_one_epoch(
                 f"Loss: {loss.item():.4f}"
             )
             writer.add_scalar("Loss/train_step", loss.item(), global_step)
+
+            # Log grad norm
+            writer.add_scalar("Train/grad_norm", grad_norm.item(), global_step)
+
+            # Log prediction statistics
+            with torch.no_grad():
+                writer.add_scalar("Stats/pred_mean", pred.mean().item(), global_step)
+                writer.add_scalar("Stats/pred_std", pred.std().item(), global_step)
+                writer.add_scalar("Stats/target_std", target.std().item(), global_step)
+
+    # Log epoch-level timestep bucket losses
+    if loss_buckets["low"]:
+        writer.add_scalar("Loss/t_low", np.mean(loss_buckets["low"]), epoch)
+    if loss_buckets["mid"]:
+        writer.add_scalar("Loss/t_mid", np.mean(loss_buckets["mid"]), epoch)
+    if loss_buckets["high"]:
+        writer.add_scalar("Loss/t_high", np.mean(loss_buckets["high"]), epoch)
 
     return total_loss / num_batches
 
@@ -573,6 +794,26 @@ def main():
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--num-workers", type=int)
 
+    # FID tracking
+    parser.add_argument(
+        "--fid-every",
+        type=int,
+        default=0,
+        help="Compute FID every N epochs (0=disabled)",
+    )
+    parser.add_argument(
+        "--fid-samples",
+        type=int,
+        default=5000,
+        help="Number of samples for FID computation",
+    )
+    parser.add_argument(
+        "--fid-ddim-steps",
+        type=int,
+        default=50,
+        help="DDIM steps for FID sampling (faster than DDPM)",
+    )
+
     args = parser.parse_args()
 
     # Build config
@@ -745,6 +986,32 @@ def main():
     else:
         fixed_class_labels = None
 
+    # Setup FID computation if enabled
+    fid_extractor = None
+    fid_real_features = None
+    fid_sampler = None
+
+    if args.fid_every > 0:
+        print(
+            f"\nInitializing FID tracking (every {args.fid_every} epochs, {args.fid_samples} samples)..."
+        )
+        fid_extractor = InceptionFeatureExtractor(device)
+
+        # Pre-compute real image features (only once)
+        print("Extracting features from real images...")
+        fid_real_features = extract_real_features(
+            train_loader, fid_extractor, device, max_samples=args.fid_samples
+        )
+        print(f"Cached {len(fid_real_features)} real image features")
+
+        # Create DDIM sampler for faster FID computation
+        fid_sampler = DDIMSampler(
+            schedule,
+            config.diffusion.pred_type,
+            num_inference_steps=args.fid_ddim_steps,
+            guidance_scale=config.train.guidance_scale,
+        )
+
     print(f"\nStarting training: {run_name}")
     print(f"Logging to: {log_dir}")
     print("-" * 50)
@@ -790,6 +1057,33 @@ def main():
 
             if ema is not None:
                 ema.restore()
+
+        # Compute FID if enabled
+        if args.fid_every > 0 and (epoch + 1) % args.fid_every == 0:
+            print(
+                f"Computing FID ({args.fid_samples} samples, {args.fid_ddim_steps} DDIM steps)..."
+            )
+
+            if ema is not None:
+                ema.apply_shadow()
+
+            fid_score = compute_fid_score(
+                model=model,
+                vae=vae,
+                sampler=fid_sampler,
+                config=config,
+                real_features=fid_real_features,
+                extractor=fid_extractor,
+                device=device,
+                num_samples=args.fid_samples,
+                batch_size=64,
+            )
+
+            if ema is not None:
+                ema.restore()
+
+            writer.add_scalar("FID", fid_score, epoch)
+            print(f"FID: {fid_score:.2f}")
 
         # Save checkpoint
         if (epoch + 1) % config.train.save_every == 0:
