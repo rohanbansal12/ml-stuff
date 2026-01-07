@@ -1,34 +1,69 @@
 [project]
 name = "ml-stuff"
 version = "0.1.0"
-description = "Modern ML research implementations"
+description = "Machine learning experiments for self-study"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.0.0",
-    "torchvision>=0.15.0",
-    "transformers>=4.30.0",
-    "datasets>=2.0.0",
-    "accelerate>=0.20.0",
-    "bitsandbytes>=0.41.0",
-    "peft>=0.7.0",
-    "trl>=0.7.0",
-    "matplotlib>=3.5.0",
-    "seaborn>=0.12.0",
-    "pandas>=2.0.0",
-    "tqdm>=4.65.0",
-    "tensorboard>=2.10.0",
-    "einops>=0.6.0",
+    # Core ML
+    "torch>=2.0",
+    "torchvision",
+    "einops",
+    "numpy",
+    "scipy",
+
+    # Hugging Face ecosystem
+    "transformers",
+    "datasets",
+    "accelerate",
+    "safetensors",
+    "tokenizers",
+    "huggingface-hub",
+    "peft",
+    "trl",
+    "bitsandbytes; sys_platform == 'linux'",
+
+    # Visualization & data
+    "matplotlib",
+    "seaborn",
+    "pandas",
+    "pillow",
+
+    # RL
+    "gymnasium",
+
+    # Jupyter
+    "jupyter",
+    "jupyterlab",
+    "ipywidgets",
+
+    # Utilities
+    "tqdm",
+    "pyyaml",
+    "tensorboard",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
+    "ruff",
+    "pytest",
 ]
 
-
 [tool.uv]
-# For GPU instances, you might want to specify PyTorch index
-# Uncomment and modify based on your CUDA version:
-# index-url = "https://download.pytorch.org/whl/cu121"
+package = false
+# Use PyTorch's CUDA 12.4 index for Linux, default index for Mac
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+# On Linux, use CUDA wheels; on Mac, use default PyPI (which has MPS support)
+torch = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'linux'" },
+]

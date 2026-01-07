@@ -1,53 +1,102 @@
-# Quick Setup for Cloud GPU Instances
+# Setup Guide
 
-## Installation with uv (Recommended)
+## Prerequisites
 
-### First-time setup on a new instance:
+Install uv (if not already installed):
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+## Workflow
+
+### Initial Setup (on any machine)
 
 ```bash
-# Install uv (if not already installed)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Clone the repo
 git clone <your-repo-url> ml-stuff
 cd ml-stuff
-
-# Install all dependencies
-uv pip install -e .
+uv sync
 ```
 
-### For GPU instances with specific CUDA versions:
+That's it. uv automatically:
+- Creates a `.venv` in the project directory
+- Installs CUDA-enabled PyTorch on Linux
+- Installs MPS-enabled PyTorch on Mac
+- Resolves all dependencies from `uv.lock`
+
+### Activating the Environment
 
 ```bash
-# CUDA 12.1 (most common for modern GPUs)
-uv pip install -e . --index-url https://download.pytorch.org/whl/cu121
+# Option 1: Use uv run (recommended - no activation needed)
+uv run python train.py
+uv run jupyter lab
 
-# CUDA 11.8 (for older setups)
-uv pip install -e . --index-url https://download.pytorch.org/whl/cu118
+# Option 2: Activate manually
+source .venv/bin/activate
+python train.py
 ```
 
-### Install dev dependencies (optional):
+### Adding New Dependencies
 
 ```bash
-uv pip install -e ".[dev]"
+# Add a package
+uv add <package-name>
+
+# Add a dev dependency
+uv add --dev <package-name>
+
+# Then commit pyproject.toml and uv.lock
+git add pyproject.toml uv.lock
+git commit -m "Add <package-name>"
+```
+
+### Syncing After Git Pull
+
+After pulling changes that modified `pyproject.toml` or `uv.lock`:
+```bash
+uv sync
+```
+
+### Updating Dependencies
+
+```bash
+# Update all packages to latest compatible versions
+uv lock --upgrade
+uv sync
+
+# Update a specific package
+uv lock --upgrade-package torch
+uv sync
 ```
 
 ## Verify Installation
 
 ```bash
-python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
+uv run python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}'); print(f'MPS: {torch.backends.mps.is_available()}')"
 ```
 
-## Alternative: Using uv sync (for locked dependencies)
+Expected output:
+- **Mac M1**: CUDA: False, MPS: True
+- **Linux GPU**: CUDA: True, MPS: False
 
-If you want reproducible builds across instances:
+## Troubleshooting
+
+### Different CUDA Version Needed
+
+If your GPU instance has a different CUDA version, edit `pyproject.toml`:
+```toml
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu118"  # Change to cu118, cu121, etc.
+```
+
+Then regenerate the lock:
+```bash
+uv lock --upgrade-package torch --upgrade-package torchvision
+```
+
+### Fresh Start
 
 ```bash
-# First time: create a lock file
-uv lock
-
-# On new instances: install from lock
+rm -rf .venv uv.lock
 uv sync
 ```
-
-This ensures identical package versions across all your GPU instances.
