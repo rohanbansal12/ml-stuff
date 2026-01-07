@@ -15,28 +15,28 @@ Usage:
     python train_vae.py --preset fast --use-lpips --use-adversarial --kl-weight 0.001
 """
 
-import torch
-from torch.utils.tensorboard import SummaryWriter
-import torchvision
-from pathlib import Path
-from datetime import datetime
 import argparse
-from typing import Optional
-from contextlib import nullcontext
 import sys
+from contextlib import nullcontext
+from datetime import datetime
+from pathlib import Path
+
+import torch
+import torchvision
+from torch.utils.tensorboard import SummaryWriter
 
 sys.path.append(str(Path(__file__).parent.parent))
-from vae.config import VAEConfig, VAE_PRESETS
+from vae.config import VAE_PRESETS, VAEConfig
+from vae.data import get_dataloaders
 from vae.model import (
+    LPIPS,
     VAE,
     PatchDiscriminator,
-    LPIPS,
-    vae_loss,
+    count_parameters,
     hinge_loss_dis,
     hinge_loss_gen,
-    count_parameters,
+    vae_loss,
 )
-from vae.data import get_dataloaders
 
 
 def train_one_epoch(
@@ -47,11 +47,11 @@ def train_one_epoch(
     device: torch.device,
     writer: SummaryWriter,
     epoch: int,
-    scaler: Optional[torch.amp.GradScaler] = None,
-    autocast_dtype: Optional[torch.dtype] = None,
-    lpips_model: Optional[LPIPS] = None,
-    discriminator: Optional[PatchDiscriminator] = None,
-    disc_optimizer: Optional[torch.optim.Optimizer] = None,
+    scaler: torch.amp.GradScaler | None = None,
+    autocast_dtype: torch.dtype | None = None,
+    lpips_model: LPIPS | None = None,
+    discriminator: PatchDiscriminator | None = None,
+    disc_optimizer: torch.optim.Optimizer | None = None,
 ) -> dict:
     """Train for one epoch, return metrics dict."""
     model.train()
@@ -176,9 +176,7 @@ def train_one_epoch(
             if "lpips_loss" in metrics:
                 log_str += f", lpips: {metrics['lpips_loss']:.4f}"
             if use_adv:
-                log_str += (
-                    f", g_adv: {gen_adv_loss_value:.4f}, d: {disc_loss_value:.4f}"
-                )
+                log_str += f", g_adv: {gen_adv_loss_value:.4f}, d: {disc_loss_value:.4f}"
             log_str += f", β={kl_weight:.4f})"
             print(log_str)
 
@@ -208,9 +206,7 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def generate_samples(
-    model: VAE, device: torch.device, num_samples: int = 16
-) -> torch.Tensor:
+def generate_samples(model: VAE, device: torch.device, num_samples: int = 16) -> torch.Tensor:
     """Generate samples from the prior."""
     model.eval()
     samples = model.sample(num_samples, device)
@@ -244,8 +240,8 @@ def save_checkpoint(
     epoch: int,
     config: VAEConfig,
     metrics: dict,
-    discriminator: Optional[PatchDiscriminator] = None,
-    disc_optimizer: Optional[torch.optim.Optimizer] = None,
+    discriminator: PatchDiscriminator | None = None,
+    disc_optimizer: torch.optim.Optimizer | None = None,
 ):
     """Save training checkpoint."""
     checkpoint = {
@@ -282,9 +278,7 @@ def main():
     parser.add_argument("--channels", type=int)
 
     # LPIPS
-    parser.add_argument(
-        "--use-lpips", action="store_true", help="Enable LPIPS perceptual loss"
-    )
+    parser.add_argument("--use-lpips", action="store_true", help="Enable LPIPS perceptual loss")
     parser.add_argument("--lpips-weight", type=float, help="Weight for LPIPS loss")
 
     # Adversarial
@@ -292,9 +286,7 @@ def main():
         "--use-adversarial", action="store_true", help="Enable adversarial training"
     )
     parser.add_argument("--adv-weight", type=float, help="Weight for adversarial loss")
-    parser.add_argument(
-        "--adv-start-epoch", type=int, help="Epoch to start adversarial training"
-    )
+    parser.add_argument("--adv-start-epoch", type=int, help="Epoch to start adversarial training")
 
     # Performance
     parser.add_argument("--mixed-precision", type=str, choices=["no", "fp16", "bf16"])
@@ -481,9 +473,7 @@ def main():
         if "lpips_loss" in metrics:
             log_str += f", lpips: {metrics['lpips_loss']:.4f}"
         if "gen_adv_loss" in metrics:
-            log_str += (
-                f", g_adv: {metrics['gen_adv_loss']:.4f}, d: {metrics['disc_loss']:.4f}"
-            )
+            log_str += f", g_adv: {metrics['gen_adv_loss']:.4f}, d: {metrics['disc_loss']:.4f}"
         log_str += ")"
         print(log_str)
 

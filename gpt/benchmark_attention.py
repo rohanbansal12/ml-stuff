@@ -3,13 +3,13 @@ Benchmark script to compare MHA vs GQA vs MQA.
 Measures memory usage and generation latency.
 """
 
-import torch
-import torch.cuda
 import argparse
-from typing import Dict, List
 import json
 import sys
 from pathlib import Path
+
+import torch
+import torch.cuda
 
 sys.path.append(str(Path(__file__).parent.parent))
 from gpt.model import GPT, GPTConfig
@@ -24,7 +24,7 @@ def measure_memory_and_latency(
     num_warmup: int = 3,
     num_runs: int = 10,
     use_cache: bool = True,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Measure peak memory and average latency for generation.
 
@@ -36,9 +36,7 @@ def measure_memory_and_latency(
     model.eval()
 
     # Create dummy prompt
-    prompt = torch.randint(
-        0, model.config.vocab_size, (batch_size, prompt_len), device=device
-    )
+    prompt = torch.randint(0, model.config.vocab_size, (batch_size, prompt_len), device=device)
 
     # Warmup runs
     for _ in range(num_warmup):
@@ -78,10 +76,7 @@ def measure_memory_and_latency(
         "peak_memory_mb": peak_memory,
         "avg_latency_ms": avg_latency,
         "tokens_per_sec": tokens_per_sec,
-        "latency_std_ms": (
-            sum((l - avg_latency) ** 2 for l in latencies) / len(latencies)
-        )
-        ** 0.5,
+        "latency_std_ms": (sum((l - avg_latency) ** 2 for l in latencies) / len(latencies)) ** 0.5,
     }
 
 
@@ -92,9 +87,7 @@ def estimate_kv_cache_size(
     # Cache stores K and V for each layer
     # Shape per layer: (batch, num_kv_heads, seq_len, d_k) * 2 (K and V)
     d_k = config.d_model // config.num_heads
-    cache_elements = (
-        batch_size * config.num_kv_heads * seq_len * d_k * 2 * config.num_layers
-    )
+    cache_elements = batch_size * config.num_kv_heads * seq_len * d_k * 2 * config.num_layers
     return cache_elements * dtype_bytes / 1024**2
 
 
@@ -108,7 +101,7 @@ def run_comparison(
     gen_len: int = 128,
     batch_size: int = 1,
     device: str = "cuda",
-) -> List[Dict]:
+) -> list[dict]:
     """Run comparison across MHA, GQA, and MQA configurations."""
 
     device = torch.device(device)
@@ -146,9 +139,7 @@ def run_comparison(
         model.eval()
 
         num_params = model.get_num_params()
-        kv_cache_estimate = estimate_kv_cache_size(
-            config, prompt_len + gen_len, batch_size
-        )
+        kv_cache_estimate = estimate_kv_cache_size(config, prompt_len + gen_len, batch_size)
 
         print(f"Parameters: {num_params:,}")
         print(f"Estimated KV cache size: {kv_cache_estimate:.2f} MB")
@@ -189,7 +180,7 @@ def run_comparison(
     return results
 
 
-def print_summary(results: List[Dict]):
+def print_summary(results: list[dict]):
     """Print comparison summary table."""
     print("\n" + "=" * 80)
     print("SUMMARY")
@@ -199,9 +190,7 @@ def print_summary(results: List[Dict]):
     print(
         f"{'Config':<10} {'KV Heads':>10} {'Params':>12} {'KV Cache':>12} {'Memory':>12} {'Latency':>12} {'Tok/s':>10}"
     )
-    print(
-        f"{'':^10} {'':>10} {'':>12} {'(est. MB)':>12} {'(MB)':>12} {'(ms)':>12} {'':>10}"
-    )
+    print(f"{'':^10} {'':>10} {'':>12} {'(est. MB)':>12} {'(MB)':>12} {'(ms)':>12} {'':>10}")
     print("-" * 80)
 
     baseline_latency = results[0]["cached"]["avg_latency_ms"]

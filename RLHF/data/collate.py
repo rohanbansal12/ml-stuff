@@ -1,5 +1,7 @@
+from collections.abc import Sequence
+from typing import Any
+
 import torch
-from typing import Sequence, Dict, Any
 
 
 def _get(item: Any, key: str):
@@ -8,9 +10,10 @@ def _get(item: Any, key: str):
         return item[key]
     return getattr(item, key)
 
+
 def make_response_mask_label_space(
     attention_mask: torch.Tensor,  # [B, T]
-    prompt_lens: torch.Tensor,     # [B]
+    prompt_lens: torch.Tensor,  # [B]
 ) -> torch.Tensor:
     """Create a mask selecting only response tokens in label space.
 
@@ -42,10 +45,11 @@ def make_response_mask_label_space(
 
     return completion_mask_label
 
+
 def collate_preference_batch(
     tokenizer,
-    tokenized_examples: Sequence[Dict[str, Any]],
-) -> Dict[str, torch.Tensor]:
+    tokenized_examples: Sequence[dict[str, Any]],
+) -> dict[str, torch.Tensor]:
     """Collate and pad tokenized preference examples into a batch.
 
     Takes a list of individually tokenized preference examples (with chosen and

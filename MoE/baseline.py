@@ -1,19 +1,19 @@
-import torch
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer
-from typing import Dict, List, Callable, Optional, Set
 import argparse
+import sys
+from collections.abc import Callable
 from pathlib import Path
+
 import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+import seaborn as sns
+import torch
 from scipy import stats as scipy_stats
-import sys
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from MoE.data import DEFAULT_SOURCES, load_multi_source_data
-
 
 MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -52,7 +52,7 @@ def build_model_and_tokenizer(
     return model, tokenizer
 
 
-def get_router_hook(layer_idx: int, store: Dict[int, List[torch.Tensor]]) -> Callable:
+def get_router_hook(layer_idx: int, store: dict[int, list[torch.Tensor]]) -> Callable:
     """Creates a forward hook to capture routing logits for a specific layer.
 
     Args:
@@ -76,7 +76,7 @@ def get_router_hook(layer_idx: int, store: Dict[int, List[torch.Tensor]]) -> Cal
     return hook
 
 
-def attach_router_hooks(layer_att, routing_store: Dict[int, List[torch.Tensor]]) -> int:
+def attach_router_hooks(layer_att, routing_store: dict[int, list[torch.Tensor]]) -> int:
     """Attaches forward hooks to capture routing logits across all MoE layers.
 
     Iterates through all layers in the model and registers forward hooks on the router
@@ -288,7 +288,7 @@ def save_baseline_routing_plots(
     # Sample 6 layers spread across the model
     sample_layers = np.linspace(0, num_layers - 1, 6, dtype=int)
 
-    for ax, layer_idx in zip(axes, sample_layers):
+    for ax, layer_idx in zip(axes, sample_layers, strict=False):
         layer_entropy = entropy_per_token[layer_idx]
         ax.hist(layer_entropy, bins=50, density=True, alpha=0.7, color="purple")
         ax.axvline(
@@ -418,7 +418,7 @@ def compute_routing_weights_stats(
 def save_routing_weight_plots(
     stats: dict,
     out_dir: str | Path,
-    category: Optional[str] = None,
+    category: str | None = None,
 ):
     """
     Generate plots for top-2 routing weight distribution analysis.
@@ -510,9 +510,7 @@ def save_routing_weight_plots(
     ax.set_xlabel("Layer")
     ax.set_ylabel("Weight Difference (primary - secondary)")
     ax.set_ylim(-0.1, 1.0)
-    ax.set_title(
-        f"Router Decisiveness by Layer{title_suffix}\n(0=equal, 1=primary only)"
-    )
+    ax.set_title(f"Router Decisiveness by Layer{title_suffix}\n(0=equal, 1=primary only)")
     ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -527,7 +525,7 @@ def save_routing_weight_plots(
 
     sample_layers = np.linspace(0, num_layers - 1, 6, dtype=int)
 
-    for ax, layer_idx in zip(axes, sample_layers):
+    for ax, layer_idx in zip(axes, sample_layers, strict=False):
         layer_weights = primary_weight[layer_idx]
 
         ax.hist(
@@ -607,9 +605,7 @@ def save_routing_weight_plots(
     ax.set_xlabel("Layer")
     ax.set_ylabel("Normalized Entropy (between selected experts)")
     ax.set_ylim(0, 1)
-    ax.set_title(
-        f"Weight Entropy{title_suffix}\n(1.0=equal weights, 0.0=single expert)"
-    )
+    ax.set_title(f"Weight Entropy{title_suffix}\n(1.0=equal weights, 0.0=single expert)")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_dir / "selected_entropy_by_layer.png", dpi=150)
@@ -624,9 +620,7 @@ def save_routing_weight_plots(
     hist_matrix = np.zeros((num_layers, len(bins_weight) - 1))
 
     for layer_idx in range(num_layers):
-        hist, _ = np.histogram(
-            primary_weight[layer_idx], bins=bins_weight, density=True
-        )
+        hist, _ = np.histogram(primary_weight[layer_idx], bins=bins_weight, density=True)
         hist_matrix[layer_idx] = hist
 
     sns.heatmap(
@@ -635,9 +629,7 @@ def save_routing_weight_plots(
         ax=ax,
         cbar_kws={"label": "Density"},
         xticklabels=10,
-        yticklabels=[
-            f"{bins_weight[i]:.2f}" for i in range(0, len(bins_weight) - 1, 5)
-        ],
+        yticklabels=[f"{bins_weight[i]:.2f}" for i in range(0, len(bins_weight) - 1, 5)],
     )
     ax.set_xlabel("Layer")
     ax.set_ylabel("Primary Expert Weight")
@@ -667,9 +659,7 @@ def save_routing_weight_plots(
     for layer_idx in range(num_layers):
         layer_pw = primary_weight[layer_idx]
         for i, (low, high, _) in enumerate(thresholds):
-            category_counts[layer_idx, i] = (
-                (layer_pw >= low) & (layer_pw < high)
-            ).sum()
+            category_counts[layer_idx, i] = ((layer_pw >= low) & (layer_pw < high)).sum()
 
     # Normalize to percentages
     category_pcts = category_counts / category_counts.sum(axis=1, keepdims=True) * 100
@@ -730,9 +720,7 @@ def save_routing_weight_plots(
         f.write(f"  Overall mean:   {primary_weight.mean():.4f}\n")
         f.write(f"  Overall median: {np.median(primary_weight):.4f}\n")
         f.write(f"  Overall std:    {primary_weight.std():.4f}\n")
-        f.write(
-            f"  Layer range:    [{primary_mean.min():.4f}, {primary_mean.max():.4f}]\n\n"
-        )
+        f.write(f"  Layer range:    [{primary_mean.min():.4f}, {primary_mean.max():.4f}]\n\n")
 
         f.write("Weight Difference (primary - secondary):\n")
         f.write(f"  Overall mean:   {weight_diff.mean():.4f}\n")
@@ -753,7 +741,7 @@ def save_routing_weight_plots(
 
 
 def analyze_routing_weights_by_category(
-    category_data: Dict[str, dict],
+    category_data: dict[str, dict],
     out_dir: str | Path,
 ):
     """
@@ -897,9 +885,7 @@ def analyze_routing_weights_by_category(
             }
         )
 
-    pd.DataFrame(comparison_data).to_csv(
-        comparison_dir / "category_comparison.csv", index=False
-    )
+    pd.DataFrame(comparison_data).to_csv(comparison_dir / "category_comparison.csv", index=False)
 
     print(f"Saved comparison plots to {comparison_dir}")
 
@@ -946,9 +932,7 @@ def analyze_entropy(
 
     # Build sequence mapping
     cum_lengths = torch.cumsum(seq_lengths, dim=0)
-    seq_starts = torch.cat(
-        [torch.tensor([0], device=seq_lengths.device), cum_lengths[:-1]]
-    )
+    seq_starts = torch.cat([torch.tensor([0], device=seq_lengths.device), cum_lengths[:-1]])
 
     def get_token_locations(indices: torch.Tensor) -> dict:
         """Map flat token indices to (sequence_idx, position_in_sequence)."""
@@ -997,7 +981,7 @@ def save_entropy_analysis_plots(
     dataset,
     tokenizer,
     out_dir: str | Path,
-    category: Optional[str] = None,
+    category: str | None = None,
     num_extreme_tokens: int = 50,
 ):
     """
@@ -1065,7 +1049,7 @@ def save_entropy_analysis_plots(
 
     sample_layers = np.linspace(0, num_layers - 1, 6, dtype=int)
 
-    for ax, layer_idx in zip(axes, sample_layers):
+    for ax, layer_idx in zip(axes, sample_layers, strict=False):
         layer_entropy = norm_entropy[layer_idx]
         layer_entropy = layer_entropy[np.isfinite(layer_entropy)]
 
@@ -1136,7 +1120,7 @@ def save_entropy_analysis_plots(
     if percentiles:
         colors = ["red", "orange", "green", "orange", "red"]
         labels = ["5th", "25th", "50th", "75th", "95th"]
-        for (pname, pval), color, label in zip(percentiles.items(), colors, labels):
+        for (pname, pval), color, label in zip(percentiles.items(), colors, labels, strict=False):
             ax.axvline(
                 pval,
                 color=color,
@@ -1202,9 +1186,7 @@ def save_entropy_analysis_plots(
     for layer_idx in range(num_layers):
         layer_ent = norm_entropy[layer_idx]
         for i, (low, high, _, _) in enumerate(thresholds):
-            category_counts[layer_idx, i] = (
-                (layer_ent >= low) & (layer_ent < high)
-            ).sum()
+            category_counts[layer_idx, i] = ((layer_ent >= low) & (layer_ent < high)).sum()
 
     category_pcts = category_counts / category_counts.sum(axis=1, keepdims=True) * 100
 
@@ -1404,21 +1386,13 @@ def save_entropy_analysis_plots(
             f.write("\n")
 
         f.write("Layer Statistics:\n")
-        f.write(
-            f"  Lowest mean entropy:  Layer {np.argmin(layer_mean)} ({layer_mean.min():.4f})\n"
-        )
-        f.write(
-            f"  Highest mean entropy: Layer {np.argmax(layer_mean)} ({layer_mean.max():.4f})\n"
-        )
-        f.write(
-            f"  Mean entropy range:   [{layer_mean.min():.4f}, {layer_mean.max():.4f}]\n\n"
-        )
+        f.write(f"  Lowest mean entropy:  Layer {np.argmin(layer_mean)} ({layer_mean.min():.4f})\n")
+        f.write(f"  Highest mean entropy: Layer {np.argmax(layer_mean)} ({layer_mean.max():.4f})\n")
+        f.write(f"  Mean entropy range:   [{layer_mean.min():.4f}, {layer_mean.max():.4f}]\n\n")
 
         # Token type analysis if we decoded tokens
         if extreme_tokens_data:
-            high_tokens = [
-                d["token"] for d in extreme_tokens_data if d["type"] == "high"
-            ]
+            high_tokens = [d["token"] for d in extreme_tokens_data if d["type"] == "high"]
             low_tokens = [d["token"] for d in extreme_tokens_data if d["type"] == "low"]
 
             f.write("High Entropy Token Examples (router uncertain):\n")
@@ -1550,9 +1524,7 @@ def compare_entropy_across_categories(
             }
         )
 
-    pd.DataFrame(summary_data).to_csv(
-        out_dir / "entropy_category_comparison.csv", index=False
-    )
+    pd.DataFrame(summary_data).to_csv(out_dir / "entropy_category_comparison.csv", index=False)
 
     print(f"Saved category comparison to {out_dir}")
 
@@ -1610,9 +1582,7 @@ def compute_position_significance(
             if len(entropy_a) < 2 or len(entropy_b) < 2:
                 continue
 
-            u_stat, p_val = scipy_stats.mannwhitneyu(
-                entropy_a, entropy_b, alternative="two-sided"
-            )
+            u_stat, p_val = scipy_stats.mannwhitneyu(entropy_a, entropy_b, alternative="two-sided")
 
             n1, n2 = len(entropy_a), len(entropy_b)
             effect_size = 1 - (2 * u_stat) / (n1 * n2)
@@ -1711,9 +1681,7 @@ def analyze_position(
             return torch.zeros(num_layers, num_experts)
         counts = torch.zeros(num_layers, num_experts, dtype=torch.long)
         for layer in range(num_layers):
-            counts[layer] = torch.bincount(
-                expert_ids[layer, mask], minlength=num_experts
-            )
+            counts[layer] = torch.bincount(expert_ids[layer, mask], minlength=num_experts)
         return counts.float() / mask_count
 
     output_dict = {
@@ -1722,9 +1690,7 @@ def analyze_position(
         "bucket_names": list(position_buckets.keys()),
         "bucket_counts": {k: v.sum().item() for k, v in position_buckets.items()},
         # Per-bucket statistics
-        "utilization_by_position": {
-            k: _get_util(v) for k, v in position_buckets.items()
-        },
+        "utilization_by_position": {k: _get_util(v) for k, v in position_buckets.items()},
         "entropy_by_position": {
             k: norm_entropy[:, v].mean(dim=-1) for k, v in position_buckets.items()
         },
@@ -1819,7 +1785,7 @@ def save_position_analysis_plots(
     if n_buckets == 1:
         axes = [axes]
 
-    for ax, bucket in zip(axes, bucket_names):
+    for ax, bucket in zip(axes, bucket_names, strict=False):
         util = stats["utilization_by_position"][bucket].numpy()
         expected = 1.0 / num_experts
 
@@ -1848,7 +1814,7 @@ def save_position_analysis_plots(
     if n_buckets - 1 == 1:
         axes = [axes]
 
-    for ax, bucket in zip(axes, [b for b in bucket_names if b != "0-50"]):
+    for ax, bucket in zip(axes, [b for b in bucket_names if b != "0-50"], strict=False):
         util = stats["utilization_by_position"][bucket].numpy()
         diff = util - global_util.numpy()
 
@@ -2034,9 +2000,7 @@ def analyze_cross_layer_consistency(
         for j in range(i, num_layers):
             if i == j:
                 # Self MI is entropy
-                expert_counts = torch.bincount(
-                    expert_ids[i], minlength=num_experts
-                ).float()
+                expert_counts = torch.bincount(expert_ids[i], minlength=num_experts).float()
                 p = expert_counts / total_tokens
                 p = p[p > 0]
                 mi = -(p * torch.log(p)).sum()
@@ -2046,9 +2010,7 @@ def analyze_cross_layer_consistency(
                 for ei in range(num_experts):
                     mask = expert_ids[i] == ei
                     if mask.sum() > 0:
-                        ej_counts = torch.bincount(
-                            expert_ids[j, mask], minlength=num_experts
-                        )
+                        ej_counts = torch.bincount(expert_ids[j, mask], minlength=num_experts)
                         joint_counts[ei] = ej_counts.float()
 
                 joint_p = joint_counts / total_tokens
@@ -2062,9 +2024,7 @@ def analyze_cross_layer_consistency(
                 for ei in range(num_experts):
                     for ej in range(num_experts):
                         if joint_p[ei, ej] > 0 and p_i[ei] > 0 and p_j[ej] > 0:
-                            mi += joint_p[ei, ej] * torch.log(
-                                joint_p[ei, ej] / (p_i[ei] * p_j[ej])
-                            )
+                            mi += joint_p[ei, ej] * torch.log(joint_p[ei, ej] / (p_i[ei] * p_j[ej]))
 
             mutual_info[i, j] = mi
             mutual_info[j, i] = mi
@@ -2115,9 +2075,7 @@ def analyze_cross_layer_consistency(
         for p in top_paths
     ]
     output_dict["num_unique_paths"] = len(path_counts)
-    output_dict["path_concentration"] = (
-        sum(c for _, c in top_paths) / max_tokens_for_clustering
-    )
+    output_dict["path_concentration"] = sum(c for _, c in top_paths) / max_tokens_for_clustering
 
     # ============================
     # 5. LAYER-WISE ROUTING ENTROPY
@@ -2134,9 +2092,7 @@ def analyze_cross_layer_consistency(
         for ei in range(num_experts):
             mask = expert_ids[layer] == ei
             if mask.sum() > 0:
-                ej_counts = torch.bincount(
-                    expert_ids[layer + 1, mask], minlength=num_experts
-                )
+                ej_counts = torch.bincount(expert_ids[layer + 1, mask], minlength=num_experts)
                 joint_counts[ei] = ej_counts.float()
 
         joint_p = joint_counts / total_tokens
@@ -2156,9 +2112,7 @@ def analyze_cross_layer_consistency(
         conditional_entropy.append(h_cond.item())
 
     output_dict["conditional_entropy"] = torch.tensor(conditional_entropy)
-    output_dict["conditional_entropy_normalized"] = (
-        torch.tensor(conditional_entropy) / max_entropy
-    )
+    output_dict["conditional_entropy_normalized"] = torch.tensor(conditional_entropy) / max_entropy
 
     # ============================
     # 6. "STICKY" EXPERT PAIRS
@@ -2170,13 +2124,9 @@ def analyze_cross_layer_consistency(
         trans = output_dict["transition_matrices"][layer]
 
         # Expected under independence
-        marginal_current = torch.bincount(
-            expert_ids[layer], minlength=num_experts
-        ).float()
+        marginal_current = torch.bincount(expert_ids[layer], minlength=num_experts).float()
         marginal_current = marginal_current / total_tokens
-        marginal_next = torch.bincount(
-            expert_ids[layer + 1], minlength=num_experts
-        ).float()
+        marginal_next = torch.bincount(expert_ids[layer + 1], minlength=num_experts).float()
         marginal_next = marginal_next / total_tokens
 
         expected = marginal_current.unsqueeze(1) * marginal_next.unsqueeze(0)
@@ -2186,9 +2136,7 @@ def analyze_cross_layer_consistency(
         for ei in range(num_experts):
             mask = expert_ids[layer] == ei
             if mask.sum() > 0:
-                ej_counts = torch.bincount(
-                    expert_ids[layer + 1, mask], minlength=num_experts
-                )
+                ej_counts = torch.bincount(expert_ids[layer + 1, mask], minlength=num_experts)
                 joint_counts[ei] = ej_counts.float()
         observed = joint_counts / total_tokens
 
@@ -2200,7 +2148,7 @@ def analyze_cross_layer_consistency(
         flat_ratio = ratio.flatten()
         top_vals, top_idx = torch.topk(flat_ratio, top_k_pairs)
 
-        for val, idx in zip(top_vals, top_idx):
+        for val, idx in zip(top_vals, top_idx, strict=False):
             ei = idx // num_experts
             ej = idx % num_experts
             sticky_pairs.append(
@@ -2222,7 +2170,7 @@ def analyze_cross_layer_consistency(
 def save_cross_layer_plots(
     stats: dict,
     out_dir: str | Path,
-    category: Optional[str] = None,
+    category: str | None = None,
 ):
     """
     Generate plots for cross-layer routing consistency analysis.
@@ -2267,9 +2215,7 @@ def save_cross_layer_plots(
 
     layers = np.arange(len(same_rate))
     ax.bar(layers, same_rate, color="steelblue", alpha=0.8)
-    ax.axhline(
-        expected, color="red", linestyle="--", label=f"Random baseline ({expected:.3f})"
-    )
+    ax.axhline(expected, color="red", linestyle="--", label=f"Random baseline ({expected:.3f})")
 
     ax.set_xlabel("Layer Transition (L → L+1)")
     ax.set_ylabel("Same Expert Rate")
@@ -2296,9 +2242,7 @@ def save_cross_layer_plots(
     ax.set_ylabel("Normalized Conditional Entropy")
     ax.set_title(f"Routing Predictability{title_suffix}\n(lower = more predictable)")
     ax.set_xticks(np.arange(len(cond_entropy)))
-    ax.set_xticklabels(
-        [f"{i}→{i + 1}" for i in range(len(cond_entropy))], rotation=45, ha="right"
-    )
+    ax.set_xticklabels([f"{i}→{i + 1}" for i in range(len(cond_entropy))], rotation=45, ha="right")
     ax.set_ylim(0, 1.1)
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -2317,7 +2261,7 @@ def save_cross_layer_plots(
     if len(sample_layers) == 1:
         axes = [axes]
 
-    for ax, layer in zip(axes, sample_layers):
+    for ax, layer in zip(axes, sample_layers, strict=False):
         trans = stats["transition_matrices"][layer].numpy()
 
         sns.heatmap(
@@ -2362,9 +2306,7 @@ def save_cross_layer_plots(
     ax.set_ylabel("Mean Diagonal Probability")
     ax.set_title(f"Same-Expert Transition Strength{title_suffix}")
     ax.set_xticks(np.arange(len(diagonal_mass)))
-    ax.set_xticklabels(
-        [f"{i}→{i + 1}" for i in range(len(diagonal_mass))], rotation=45, ha="right"
-    )
+    ax.set_xticklabels([f"{i}→{i + 1}" for i in range(len(diagonal_mass))], rotation=45, ha="right")
     ax.legend()
     ax.grid(True, alpha=0.3, axis="y")
     plt.tight_layout()
@@ -2420,10 +2362,7 @@ def save_cross_layer_plots(
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    paths = [
-        p["path"][:30] + "..." if len(p["path"]) > 30 else p["path"]
-        for p in top_paths[:15]
-    ]
+    paths = [p["path"][:30] + "..." if len(p["path"]) > 30 else p["path"] for p in top_paths[:15]]
     freqs = [p["frequency"] * 100 for p in top_paths[:15]]
 
     y_pos = np.arange(len(paths))
@@ -2431,9 +2370,7 @@ def save_cross_layer_plots(
     ax.set_yticks(y_pos)
     ax.set_yticklabels(paths, fontsize=8)
     ax.set_xlabel("Frequency (%)")
-    ax.set_title(
-        f"Top Routing Paths{title_suffix}\n({stats['num_unique_paths']:,} unique paths)"
-    )
+    ax.set_title(f"Top Routing Paths{title_suffix}\n({stats['num_unique_paths']:,} unique paths)")
     ax.invert_yaxis()
     plt.tight_layout()
     plt.savefig(out_dir / "top_routing_paths.png", dpi=150)
@@ -2481,9 +2418,7 @@ def save_cross_layer_plots(
 
         f.write("Routing Path Diversity:\n")
         f.write(f"  Unique paths: {stats['num_unique_paths']:,}\n")
-        f.write(
-            f"  Top 20 paths cover: {stats['path_concentration'] * 100:.1f}% of tokens\n\n"
-        )
+        f.write(f"  Top 20 paths cover: {stats['path_concentration'] * 100:.1f}% of tokens\n\n")
 
         f.write("Adjacent Layer Agreement:\n")
         f.write(f"  Mean same-expert rate: {stats['same_expert_rate'].mean():.4f}\n")
@@ -2505,7 +2440,7 @@ def save_cross_layer_plots(
     print(f"Saved cross-layer analysis to {out_dir}")
 
 
-def load_logits(logit_out_dir: Path, categories: Optional[List | Set] = None):
+def load_logits(logit_out_dir: Path, categories: list | set | None = None):
     logit_dict = {}
     global_logits = []
     sequence_lengths = []
@@ -2527,9 +2462,7 @@ def load_logits(logit_out_dir: Path, categories: Optional[List | Set] = None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--out_dir", type=str, default="/workspace/ml-stuff/MoE/out/baseline"
-    )
+    parser.add_argument("--out_dir", type=str, default="/workspace/ml-stuff/MoE/out/baseline")
     parser.add_argument("--samples", type=int, default=50)
     parser.add_argument("--num_experts", type=int, default=60)
     args = parser.parse_args()
@@ -2581,9 +2514,7 @@ def main():
             token_counts.append(input_ids.numel())
 
         token_counts = torch.tensor(token_counts, dtype=torch.long)
-        final_output = torch.zeros(
-            num_layers, token_counts.sum().item(), args.num_experts
-        )
+        final_output = torch.zeros(num_layers, token_counts.sum().item(), args.num_experts)
         for layer_idx, data_list in routing_store.items():
             layer_logits = torch.cat(data_list, dim=0)
             final_output[layer_idx] = layer_logits
@@ -2597,9 +2528,7 @@ def main():
         torch.save(all_results[category], logit_out_dir / f"{category}.pt")
 
     ### load category-wise outputs and compute stats
-    logit_dict, global_logits, sequence_lengths = load_logits(
-        logit_out_dir, unique_categories
-    )
+    logit_dict, global_logits, sequence_lengths = load_logits(logit_out_dir, unique_categories)
 
     stats = compute_baseline_stats(logits=global_logits)
     save_baseline_routing_plots(
@@ -2630,14 +2559,10 @@ def main():
     position_stats = analyze_position(
         probs=global_logits, seq_lengths=sequence_lengths, compute_significance=True
     )
-    save_position_analysis_plots(
-        stats=position_stats, out_dir=out_dir / "position", category=None
-    )
+    save_position_analysis_plots(stats=position_stats, out_dir=out_dir / "position", category=None)
 
     consistency_stats = analyze_cross_layer_consistency(probs=global_logits, top_k=1)
-    save_cross_layer_plots(
-        stats=consistency_stats, out_dir=out_dir / "cross", category=None
-    )
+    save_cross_layer_plots(stats=consistency_stats, out_dir=out_dir / "cross", category=None)
 
 
 if __name__ == "__main__":

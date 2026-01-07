@@ -1,14 +1,14 @@
-import torch
-import gymnasium as gym
-from gymnasium.vector import SyncVectorEnv
-from dataclasses import dataclass, asdict
-from collections import deque
 import argparse
-import numpy as np
-from torch.utils.tensorboard import SummaryWriter
 import os
+from collections import deque
+from dataclasses import asdict, dataclass
 
+import gymnasium as gym
+import numpy as np
+import torch
+from gymnasium.vector import SyncVectorEnv
 from net import ActorCriticNet
+from torch.utils.tensorboard import SummaryWriter
 from util import RolloutBuffer
 
 
@@ -118,7 +118,7 @@ class Tracker:
         """Log metrics from a rollout."""
         self.total_steps += steps
 
-        for ret, length in zip(episode_returns, episode_lengths):
+        for ret, length in zip(episode_returns, episode_lengths, strict=False):
             self.total_episodes += 1
             self.episode_returns.append(ret)
             self.episode_lengths.append(length)
@@ -258,7 +258,9 @@ class A2CAgent:
         self.optimizer.zero_grad()
         total_loss.backward()
         if self.config.max_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.config.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(
+                self.actor_critic.parameters(), self.config.max_grad_norm
+            )
         self.optimizer.step()
 
         return {
@@ -382,7 +384,9 @@ def main():
         if (update_idx + 1) % config.eval_interval == 0:
             eval_returns, eval_lengths = agent.evaluate(eval_env, config.eval_episodes)
             mean_return = sum(eval_returns) / len(eval_returns)
-            std_return = (sum((r - mean_return) ** 2 for r in eval_returns) / len(eval_returns)) ** 0.5
+            std_return = (
+                sum((r - mean_return) ** 2 for r in eval_returns) / len(eval_returns)
+            ) ** 0.5
             mean_length = sum(eval_lengths) / len(eval_lengths)
 
             tracker.log_eval(mean_return, std_return, mean_length)

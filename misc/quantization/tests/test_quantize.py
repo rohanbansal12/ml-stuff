@@ -1,13 +1,13 @@
 import math
+
 import pytest
 import torch
-
 from quantize import (
     calc_qparams_symmetric,
-    quantize_affine,
     quant_dequant_affine,
     quant_dequant_symmetric,
     quant_error_report,
+    quantize_affine,
 )
 
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])

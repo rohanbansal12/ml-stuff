@@ -1,11 +1,10 @@
 import io
+
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from quantized_linear import quantize_matmul1, QuantLinearW8A8
-
+from quantized_linear import QuantLinearW8A8, quantize_matmul1
 
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 DTYPES_BY_DEVICE = {
@@ -195,7 +194,9 @@ def test_state_dict_roundtrip(device: str, dtype: torch.dtype):
     buf.seek(0)
 
     # Destination module: allocate buffers by passing dims
-    q2 = QuantLinearW8A8(act_clip=q1.act_clip, in_features=in_f, out_features=out_f).to(device=device)
+    q2 = QuantLinearW8A8(act_clip=q1.act_clip, in_features=in_f, out_features=out_f).to(
+        device=device
+    )
     q2.load_state_dict(torch.load(buf, map_location=device))
 
     # bias is a Parameter, so load_state_dict will restore it automatically
@@ -226,7 +227,9 @@ def test_act_clip_config_is_used(device: str, dtype: torch.dtype):
 
     layer = nn.Linear(in_f, out_f, bias=True).to(device=device, dtype=dtype)
 
-    q_pct = QuantLinearW8A8.from_float(layer, act_clip={"type": "percentile", "p": 0.999}).to(device=device)
+    q_pct = QuantLinearW8A8.from_float(layer, act_clip={"type": "percentile", "p": 0.999}).to(
+        device=device
+    )
     q_mm = QuantLinearW8A8.from_float(layer, act_clip={"type": "minmax"}).to(device=device)
 
     y_pct = q_pct(x).float()

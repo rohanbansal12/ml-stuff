@@ -9,13 +9,13 @@ Usage:
     python benchmark_amp.py --d_model 512 --num_layers 12 --batch_size 32
 """
 
+import argparse
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
-import argparse
-from dataclasses import dataclass
-from typing import Dict, Tuple
-import sys
-from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
 from gpt.model import GPT, GPTConfig
@@ -37,15 +37,13 @@ def benchmark_forward(
     use_amp: bool,
     num_warmup: int = 5,
     num_runs: int = 20,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """Benchmark forward pass. Returns (avg_time_ms, std_time_ms)."""
     model.eval()
 
     # Warmup
     for _ in range(num_warmup):
-        with torch.amp.autocast(
-            device_type="cuda", dtype=torch.bfloat16, enabled=use_amp
-        ):
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
             _ = model(x)
 
     torch.cuda.synchronize()
@@ -57,9 +55,7 @@ def benchmark_forward(
         end = torch.cuda.Event(enable_timing=True)
 
         start.record()
-        with torch.amp.autocast(
-            device_type="cuda", dtype=torch.bfloat16, enabled=use_amp
-        ):
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
             _ = model(x)
         end.record()
 
@@ -78,16 +74,14 @@ def benchmark_backward(
     use_amp: bool,
     num_warmup: int = 5,
     num_runs: int = 20,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """Benchmark forward + backward pass. Returns (avg_time_ms, std_time_ms)."""
     model.train()
 
     # Warmup
     for _ in range(num_warmup):
         model.zero_grad()
-        with torch.amp.autocast(
-            device_type="cuda", dtype=torch.bfloat16, enabled=use_amp
-        ):
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
             logits = model(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
         loss.backward()
@@ -103,9 +97,7 @@ def benchmark_backward(
         end = torch.cuda.Event(enable_timing=True)
 
         start.record()
-        with torch.amp.autocast(
-            device_type="cuda", dtype=torch.bfloat16, enabled=use_amp
-        ):
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
             logits = model(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
         loss.backward()
@@ -127,16 +119,14 @@ def benchmark_full_step(
     use_amp: bool,
     num_warmup: int = 5,
     num_runs: int = 20,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """Benchmark full training step (forward + backward + optimizer). Returns (avg_time_ms, std_time_ms)."""
     model.train()
 
     # Warmup
     for _ in range(num_warmup):
         optimizer.zero_grad()
-        with torch.amp.autocast(
-            device_type="cuda", dtype=torch.bfloat16, enabled=use_amp
-        ):
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
             logits = model(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
         loss.backward()
@@ -152,9 +142,7 @@ def benchmark_full_step(
 
         start.record()
         optimizer.zero_grad()
-        with torch.amp.autocast(
-            device_type="cuda", dtype=torch.bfloat16, enabled=use_amp
-        ):
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
             logits = model(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
         loss.backward()
@@ -200,7 +188,7 @@ def run_benchmark(
     max_seq_len: int = 256,
     batch_size: int = 16,
     vocab_size: int = 50257,
-) -> Dict[str, BenchmarkResult]:
+) -> dict[str, BenchmarkResult]:
     """Run full benchmark comparing fp32 vs bfloat16."""
 
     device = torch.device("cuda")
@@ -261,7 +249,7 @@ def run_benchmark(
     return results
 
 
-def print_results(results: Dict[str, BenchmarkResult], config_str: str):
+def print_results(results: dict[str, BenchmarkResult], config_str: str):
     """Print benchmark results in a table."""
     print("\n" + "=" * 80)
     print("AMP BENCHMARK RESULTS")
@@ -280,9 +268,7 @@ def print_results(results: Dict[str, BenchmarkResult], config_str: str):
 
     # Forward pass
     speedup = fp32.forward_ms / bf16.forward_ms
-    print(
-        f"{'Forward (ms)':<25} {fp32.forward_ms:<15.2f} {bf16.forward_ms:<15.2f} {speedup:.2f}x"
-    )
+    print(f"{'Forward (ms)':<25} {fp32.forward_ms:<15.2f} {bf16.forward_ms:<15.2f} {speedup:.2f}x")
 
     # Backward pass (includes forward)
     speedup = fp32.backward_ms / bf16.backward_ms
@@ -292,9 +278,7 @@ def print_results(results: Dict[str, BenchmarkResult], config_str: str):
 
     # Full step
     speedup = fp32.step_ms / bf16.step_ms
-    print(
-        f"{'Full Step (ms)':<25} {fp32.step_ms:<15.2f} {bf16.step_ms:<15.2f} {speedup:.2f}x"
-    )
+    print(f"{'Full Step (ms)':<25} {fp32.step_ms:<15.2f} {bf16.step_ms:<15.2f} {speedup:.2f}x")
 
     # Memory
     reduction = (fp32.memory_mb - bf16.memory_mb) / fp32.memory_mb * 100
@@ -367,9 +351,7 @@ def benchmark_model_size():
         (768, 12, 12, "XL (768d, 12L)"),
     ]
 
-    print(
-        f"\n{'Config':<20} {'fp32 (ms)':<12} {'bf16 (ms)':<12} {'Speedup':<10} {'Mem Saved':<12}"
-    )
+    print(f"\n{'Config':<20} {'fp32 (ms)':<12} {'bf16 (ms)':<12} {'Speedup':<10} {'Mem Saved':<12}")
     print("-" * 70)
 
     for d_model, num_heads, num_layers, name in configs:
@@ -411,9 +393,7 @@ def main():
     parser.add_argument("--num_layers", type=int, default=6)
     parser.add_argument("--max_seq_len", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument(
-        "--scaling", action="store_true", help="Run batch size scaling benchmark"
-    )
+    parser.add_argument("--scaling", action="store_true", help="Run batch size scaling benchmark")
     parser.add_argument(
         "--model_size", action="store_true", help="Run model size scaling benchmark"
     )

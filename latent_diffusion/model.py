@@ -10,12 +10,11 @@ Key differences from the pixel-space U-Net:
 The architecture is otherwise the same as regular DDPM U-Net.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional
-
 from config import LatentUNetConfig
 
 
@@ -155,14 +154,10 @@ class DownBlock(nn.Module):
         for i in range(num_blocks):
             ch_in = in_channels if i == 0 else out_channels
             self.blocks.append(ResBlock(ch_in, out_channels, time_dim, groups, dropout))
-            self.attns.append(
-                SelfAttention2d(out_channels) if use_attn else nn.Identity()
-            )
+            self.attns.append(SelfAttention2d(out_channels) if use_attn else nn.Identity())
 
         if downsample:
-            self.downsample = nn.Conv2d(
-                out_channels, out_channels, 3, stride=2, padding=1
-            )
+            self.downsample = nn.Conv2d(out_channels, out_channels, 3, stride=2, padding=1)
         else:
             self.downsample = None
 
@@ -171,7 +166,7 @@ class DownBlock(nn.Module):
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         skips = []
 
-        for block, attn in zip(self.blocks, self.attns):
+        for block, attn in zip(self.blocks, self.attns, strict=False):
             x = block(x, t_emb)
             x = attn(x)
             skips.append(x)
@@ -216,9 +211,7 @@ class UpBlock(nn.Module):
             else:
                 ch_in = out_channels
             self.blocks.append(ResBlock(ch_in, out_channels, time_dim, groups, dropout))
-            self.attns.append(
-                SelfAttention2d(out_channels) if use_attn else nn.Identity()
-            )
+            self.attns.append(SelfAttention2d(out_channels) if use_attn else nn.Identity())
 
     def forward(
         self, x: torch.Tensor, skips: list[torch.Tensor], t_emb: torch.Tensor
@@ -226,7 +219,7 @@ class UpBlock(nn.Module):
         if self.upsample is not None:
             x = self.upsample(x)
 
-        for i, (block, attn) in enumerate(zip(self.blocks, self.attns)):
+        for i, (block, attn) in enumerate(zip(self.blocks, self.attns, strict=False)):
             skip = skips[-(i + 1)]
             x = torch.cat([x, skip], dim=1) if i == 0 else x
             x = block(x, t_emb)
@@ -302,9 +295,7 @@ class LatentUNet(nn.Module):
 
         # Bottleneck
         self.mid_block1 = ResBlock(current_ch, current_ch, time_dim, groups, dropout)
-        self.mid_attn = (
-            SelfAttention2d(current_ch) if config.use_bottleneck_attn else nn.Identity()
-        )
+        self.mid_attn = SelfAttention2d(current_ch) if config.use_bottleneck_attn else nn.Identity()
         self.mid_block2 = ResBlock(current_ch, current_ch, time_dim, groups, dropout)
 
         # Decoder
@@ -350,7 +341,7 @@ class LatentUNet(nn.Module):
         self,
         x: torch.Tensor,
         t: torch.Tensor,
-        class_labels: Optional[torch.Tensor] = None,
+        class_labels: torch.Tensor | None = None,
         drop_class: bool = False,
     ) -> torch.Tensor:
         """
@@ -379,8 +370,7 @@ class LatentUNet(nn.Module):
             elif self.training and self.cfg_dropout > 0:
                 # Randomly drop classes during training for CFG
                 drop_mask = (
-                    torch.rand(class_labels.shape[0], device=class_labels.device)
-                    < self.cfg_dropout
+                    torch.rand(class_labels.shape[0], device=class_labels.device) < self.cfg_dropout
                 )
                 class_labels = torch.where(drop_mask, self.null_class_idx, class_labels)
 

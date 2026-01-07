@@ -1,10 +1,12 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from quantize import quantize_symmetric, calc_qparams_symmetric, quantize_affine
 import triton
 import triton.language as tl
+from quantize import calc_qparams_symmetric, quantize_affine, quantize_symmetric
+
 
 def include(name: str) -> bool:
     # Target the “meaty” projections:
@@ -20,11 +22,11 @@ def include(name: str) -> bool:
         or name.endswith("fc2")
     )
 
+
 def exclude(name: str) -> bool:
     # Skip embeddings and lm_head (and anything else you want)
-    return (
-        ("lm_head" in name) or ("embed_tokens" in name) or ("embed_positions" in name)
-    )
+    return ("lm_head" in name) or ("embed_tokens" in name) or ("embed_positions" in name)
+
 
 def get_batch_1d(tokens_1d: torch.Tensor, batch_size: int, seq_len: int, device: str):
     # tokens_1d: [N]
@@ -36,10 +38,9 @@ def get_batch_1d(tokens_1d: torch.Tensor, batch_size: int, seq_len: int, device:
     y = torch.stack([tokens_1d[i + 1 : i + seq_len + 1] for i in ix], dim=0)
     return x, y
 
+
 class QuantLinearW8A8(nn.Module):
-    def __init__(
-        self, in_features: int, out_features: int, has_bias: bool, mode: str = "W8"
-    ):
+    def __init__(self, in_features: int, out_features: int, has_bias: bool, mode: str = "W8"):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -60,12 +61,8 @@ class QuantLinearW8A8(nn.Module):
         )
 
         # activation qparams (scalar)
-        self.register_buffer(
-            "zp_x", torch.tensor(0, dtype=torch.int64), persistent=True
-        )
-        self.register_buffer(
-            "s_x", torch.tensor(1.0, dtype=torch.float32), persistent=True
-        )
+        self.register_buffer("zp_x", torch.tensor(0, dtype=torch.int64), persistent=True)
+        self.register_buffer("s_x", torch.tensor(1.0, dtype=torch.float32), persistent=True)
 
         self.register_buffer(
             "has_bias", torch.tensor(int(has_bias), dtype=torch.uint8), persistent=True
@@ -90,12 +87,8 @@ class QuantLinearW8A8(nn.Module):
         q.w_q.copy_(w_q.contiguous())
         q.s_w.copy_(s_w.to(torch.float32).contiguous())
 
-        q.s_x.copy_(
-            torch.tensor(float(s_x), device=layer.weight.device, dtype=torch.float32)
-        )
-        q.zp_x.copy_(
-            torch.tensor(int(zp_x), device=layer.weight.device, dtype=torch.int64)
-        )
+        q.s_x.copy_(torch.tensor(float(s_x), device=layer.weight.device, dtype=torch.float32))
+        q.zp_x.copy_(torch.tensor(int(zp_x), device=layer.weight.device, dtype=torch.int64))
 
         if has_bias:
             q.bias.data.copy_(layer.bias.detach().to(torch.float32))
@@ -106,22 +99,16 @@ class QuantLinearW8A8(nn.Module):
 
     def forward(self, x: torch.Tensor):
         if self.mode == "W8":
-            y = (x.float() @ self.w_q.to(torch.float32).T) * self.s_w.to(
-                torch.float32
-            ).T
+            y = (x.float() @ self.w_q.to(torch.float32).T) * self.s_w.to(torch.float32).T
 
         elif self.mode == "W8A8_static":
             # quantize activations with fixed qparams
             x_q, x_clip = quantize_affine(
                 x, self.s_x, self.zp_x, qmin=-127, qmax=127, dtype=torch.int8
             )
-            self.last_x_clip.copy_(
-                torch.as_tensor(x_clip, device=x.device, dtype=torch.float32)
-            )
+            self.last_x_clip.copy_(torch.as_tensor(x_clip, device=x.device, dtype=torch.float32))
 
-            x_centered = x_q.to(torch.float32) - self.zp_x.to(
-                torch.float32
-            )  # zp_x is scalar
+            x_centered = x_q.to(torch.float32) - self.zp_x.to(torch.float32)  # zp_x is scalar
             w_f = self.w_q.to(torch.float32)  # [out, in]
 
             # matmul: [..., in] @ [in, out] -> [..., out]
@@ -129,9 +116,7 @@ class QuantLinearW8A8(nn.Module):
             y = y_int * (self.s_x.to(torch.float32) * self.s_w.to(torch.float32).T)
 
         elif self.mode == "W8A8_dynamic":
-            s_x, zp_x = calc_qparams_symmetric(
-                x, bits=8, per_channel=False, axis=None, qmax=127
-            )
+            s_x, zp_x = calc_qparams_symmetric(x, bits=8, per_channel=False, axis=None, qmax=127)
             x_q, x_clip = quantize_symmetric(x, s_x, 127, dtype=torch.int8)
 
             x_centered = x_q.to(torch.float32) - zp_x.to(torch.float32)
@@ -142,26 +127,28 @@ class QuantLinearW8A8(nn.Module):
             y = y + self.bias.to(y.dtype)
 
         return y.to(x.dtype)
-    
+
+
 def group_weights(W: torch.Tensor, group_size: int):
     assert W.size(1) % group_size == 0
     n_groups = W.size(1) // group_size
     return W.reshape((W.size(0), n_groups, group_size))
+
 
 def calc_group_scales(W_grouped: torch.Tensor, qmax=7, eps=1e-8):
     amax = W_grouped.abs().amax(dim=-1, keepdim=True)
     s_w = torch.clamp(amax / qmax, min=eps)
     return s_w
 
+
 def quantize_grouped(W_grouped: torch.Tensor, s_w: torch.Tensor, qmin: int, qmax: int):
     q = torch.round(W_grouped / s_w)
     q = torch.clamp(q, min=qmin, max=qmax)
     return q.to(torch.int8)
 
+
 class QuantLinearW4Grouped(nn.Module):
-    def __init__(
-        self, in_features: int, out_features: int, has_bias: bool, group_size: int
-    ):
+    def __init__(self, in_features: int, out_features: int, has_bias: bool, group_size: int):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -176,9 +163,7 @@ class QuantLinearW4Grouped(nn.Module):
         )
 
         self.register_buffer(
-            "scales",
-            torch.empty((out_features, n_groups, 1), dtype=torch.float32),
-            persistent=True
+            "scales", torch.empty((out_features, n_groups, 1), dtype=torch.float32), persistent=True
         )
 
         self.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.float32))
@@ -190,12 +175,9 @@ class QuantLinearW4Grouped(nn.Module):
         has_bias = layer.bias is not None
         device = layer.weight.device
 
-        q = cls(
-            in_features=in_f,
-            out_features=out_f,
-            has_bias=has_bias,
-            group_size=group_size
-        ).to(device)
+        q = cls(in_features=in_f, out_features=out_f, has_bias=has_bias, group_size=group_size).to(
+            device
+        )
 
         W = layer.weight.data.clone().float()
         W_g = W.view(out_f, n_groups, group_size)
@@ -228,7 +210,8 @@ class QuantLinearW4Grouped(nn.Module):
             y = y + self.bias.to(y.dtype)
 
         return y.to(orig_dtype)
-    
+
+
 def get_module_by_name(root, dotted_name):
     parts = dotted_name.split(".")
     parent = root
@@ -243,6 +226,7 @@ def get_module_by_name(root, dotted_name):
     else:
         return getattr(parent, last)
 
+
 def set_module_by_name(root, dotted_name, new_module):
     parts = dotted_name.split(".")
     parent = root
@@ -256,6 +240,7 @@ def set_module_by_name(root, dotted_name, new_module):
         parent[int(last)] = new_module
     else:
         setattr(parent, last, new_module)
+
 
 def capture_single_activation(model, layer_name, input_ids):
     acts = {}
@@ -272,6 +257,7 @@ def capture_single_activation(model, layer_name, input_ids):
 
     handle.remove()
     return acts["x"]
+
 
 class ActCalibrator:
     def __init__(self, percentiles=(0.99, 0.999)):
@@ -298,8 +284,8 @@ class ActCalibrator:
                 "min": mn,
                 "max": mx,
                 "absmax": absmax,
-                **{f"p{int(p * 1000)}": q for p, q in zip(self.ps, qs)},
-                **{f"ap{int(p * 1000)}": q for p, q in zip(self.ps, aqs)},
+                **{f"p{int(p * 1000)}": q for p, q in zip(self.ps, qs, strict=False)},
+                **{f"ap{int(p * 1000)}": q for p, q in zip(self.ps, aqs, strict=False)},
                 "n": v.numel(),
             }
         else:
@@ -307,11 +293,12 @@ class ActCalibrator:
             s["min"] = min(s["min"], mn)
             s["max"] = max(s["max"], mx)
             s["absmax"] = max(s["absmax"], absmax)
-            for p, q in zip(self.ps, qs):
+            for p, q in zip(self.ps, qs, strict=False):
                 s[f"p{int(p * 1000)}"] = max(s[f"p{int(p * 1000)}"], q)
-            for p, q in zip(self.ps, aqs):
+            for p, q in zip(self.ps, aqs, strict=False):
                 s[f"ap{int(p * 1000)}"] = max(s[f"ap{int(p * 1000)}"], q)
             s["n"] += v.numel()
+
 
 class ActChannelCalibrator:
     def __init__(self, percentiles=(0.99, 0.999), store_on_cpu=True):
@@ -320,7 +307,11 @@ class ActChannelCalibrator:
         self.store_on_cpu = store_on_cpu
 
     @torch.no_grad()
-    def observe(self, name: str, x: torch.Tensor, ):
+    def observe(
+        self,
+        name: str,
+        x: torch.Tensor,
+    ):
         xf = x.detach().reshape(-1, x.shape[-1]).float()
         axf = xf.abs()
 
@@ -335,14 +326,17 @@ class ActChannelCalibrator:
             self.stats[name] = {
                 "absmax": absmax,
                 **{f"ap{int(self.ps[i] * 1000)}": aqs[i] for i in range(len(self.ps))},
-                "n": xf.shape[0]
+                "n": xf.shape[0],
             }
         else:
             s = self.stats[name]
-            s['absmax'] = torch.max(s['absmax'], absmax)
+            s["absmax"] = torch.max(s["absmax"], absmax)
             for i in range(len(self.ps)):
-                s[f"ap{int(self.ps[i] * 1000)}"] = torch.max(s[f"ap{int(self.ps[i] * 1000)}"], aqs[i])
-            s['n'] += xf.shape[0]
+                s[f"ap{int(self.ps[i] * 1000)}"] = torch.max(
+                    s[f"ap{int(self.ps[i] * 1000)}"], aqs[i]
+                )
+            s["n"] += xf.shape[0]
+
 
 @torch.no_grad()
 def calibrate(model, tokens_1d, batch_size, seq_len, device, num_batches=10):
@@ -361,9 +355,8 @@ def calibrate(model, tokens_1d, batch_size, seq_len, device, num_batches=10):
 
     return calib.stats
 
-def attach_linear_input_hooks(
-    model, calibrator, include_filter=None, exclude_filter=None
-):
+
+def attach_linear_input_hooks(model, calibrator, include_filter=None, exclude_filter=None):
     handles = []
     for name, mod in model.named_modules():
         if isinstance(mod, nn.Linear):
@@ -382,9 +375,9 @@ def attach_linear_input_hooks(
             handles.append(mod.register_forward_hook(_make_hook(name)))
     return handles
 
+
 @torch.no_grad()
 def evaluate_simple(model, eval_data):
-
     model.eval()
     total_loss = 0.0
     total_tokens = 0
@@ -404,6 +397,7 @@ def evaluate_simple(model, eval_data):
     perplexity = math.exp(val_loss)
     return val_loss, perplexity
 
+
 class LinearFP32GEMM(nn.Module):
     def __init__(self, layer: nn.Linear):
         super().__init__()
@@ -421,6 +415,7 @@ class LinearFP32GEMM(nn.Module):
         )
         return y.to(x.dtype)
 
+
 def force_fp32_gemm_all_linears(model, include_filter=None, exclude_filter=None):
     to_replace = []
     for name, mod in model.named_modules():
@@ -436,6 +431,7 @@ def force_fp32_gemm_all_linears(model, include_filter=None, exclude_filter=None)
 
     return model
 
+
 def choose_activation_range(stats, mode: str, pkey: str = "999"):
     if mode == "minmax":
         xmin, xmax = stats["min"], stats["max"]
@@ -446,6 +442,7 @@ def choose_activation_range(stats, mode: str, pkey: str = "999"):
         raise ValueError(f"unknown mode: {mode}")
     return xmin, xmax
 
+
 def activation_qparams_from_range(xmin, xmax, bits=8, scheme="symmetric", eps=1e-8):
     qmax = (2 ** (bits - 1)) - 1  # 127 for int8
     if scheme == "symmetric":
@@ -454,10 +451,9 @@ def activation_qparams_from_range(xmin, xmax, bits=8, scheme="symmetric", eps=1e
         scale = max(a / qmax, eps)
         zp = 0
     else:
-        raise ValueError(
-            "For this OPT baseline, use symmetric activation ranges first."
-        )
+        raise ValueError("For this OPT baseline, use symmetric activation ranges first.")
     return scale, zp, qmin, qmax
+
 
 def quantize_model_w8a8(model, act_stats, mode, include, exclude):
     # gather first (avoid mutating while iterating)
@@ -470,14 +466,13 @@ def quantize_model_w8a8(model, act_stats, mode, include, exclude):
                 to_replace.append((name, mod))
 
     for name, mod in to_replace:
-        xmin, xmax = choose_activation_range(
-            act_stats[name], mode="symmetric_abs", pkey="999"
-        )
+        xmin, xmax = choose_activation_range(act_stats[name], mode="symmetric_abs", pkey="999")
         s_x, zp_x, _, _ = activation_qparams_from_range(xmin, xmax, scheme="symmetric")
         new_mod = QuantLinearW8A8.from_float(mod, s_x=s_x, zp_x=zp_x, mode=mode)
         set_module_by_name(model, name, new_mod)
 
     return model
+
 
 def quantize_model_w4(model, group_size, include, exclude):
     to_replace = []
@@ -492,6 +487,7 @@ def quantize_model_w4(model, group_size, include, exclude):
         set_module_by_name(model, name, new_mod)
 
     return model
+
 
 class HessianAgg:
     def __init__(self, store_on_cpu=True, max_rows=8000, dtype=torch.float64):
@@ -528,7 +524,8 @@ class HessianAgg:
         if diag_mean > 0:
             H = H + damp_ratio * diag_mean * torch.eye(H.size(0), dtype=H.dtype, device=H.device)
         return H.float()
-    
+
+
 def attach_one_linear_input_hook(model, layer_name: str, agg: HessianAgg):
     target = dict(model.named_modules())[layer_name]
     assert isinstance(target, torch.nn.Linear)
@@ -539,6 +536,7 @@ def attach_one_linear_input_hook(model, layer_name: str, agg: HessianAgg):
 
     h = target.register_forward_hook(hook)
     return h
+
 
 class GPTQLinear(nn.Module):
     def __init__(
@@ -657,20 +655,22 @@ def pack_int4(q: torch.Tensor) -> torch.Tensor:
     packed = (q1 << 4) | q0
     return packed.to(torch.uint8)
 
+
 def unpack_int4(packed: torch.Tensor) -> torch.Tensor:
     assert packed.dtype == torch.uint8
 
-    low  = packed & 0x0F
+    low = packed & 0x0F
     high = (packed >> 4) & 0x0F
 
-    low  = low.to(torch.int8)
+    low = low.to(torch.int8)
     high = high.to(torch.int8)
 
-    low[low >= 8]   -= 16
+    low[low >= 8] -= 16
     high[high >= 8] -= 16
 
     q = torch.stack([low, high], dim=-1)
     return q.view(*packed.shape[:-1], packed.shape[-1] * 2)
+
 
 def test_int4_pack_roundtrip():
     q = torch.randint(-8, 8, (1024,), dtype=torch.int8)
@@ -709,7 +709,7 @@ class AWQW4Packed(nn.Module):
 
         self.register_buffer(
             "x_inv_s",
-            torch.empty((in_features, ), dtype=torch.float32),
+            torch.empty((in_features,), dtype=torch.float32),
             persistent=True,
         )
 
@@ -722,11 +722,13 @@ class AWQW4Packed(nn.Module):
         has_bias = layer.bias is not None
         device = layer.weight.device
 
-        q = cls(in_features=in_f, out_features=out_f, has_bias=has_bias, group_size=group_size).to(device)
+        q = cls(in_features=in_f, out_features=out_f, has_bias=has_bias, group_size=group_size).to(
+            device
+        )
 
         W = layer.weight.detach().float()  # [out, in]
         W_g = W.view(out_f, n_groups, group_size)
-        
+
         s = s.to(device).float().view(-1)
         inv_s_vec = (1.0 / s).contiguous()
         s_view = s.view(1, n_groups, group_size)
@@ -738,7 +740,7 @@ class AWQW4Packed(nn.Module):
         scales = scales.clamp(min=1e-5)
 
         # quantize to int4-ish values (stored in int8 container)
-        w_int = torch.round(w_scaled / scales).clamp(-7, 7).to(torch.int8)   # [out, g, k]
+        w_int = torch.round(w_scaled / scales).clamp(-7, 7).to(torch.int8)  # [out, g, k]
 
         # pack last dim (k) -> k/2 bytes
         w_packed = pack_int4(w_int)  # expect uint8 [out, g, k/2]
@@ -843,19 +845,34 @@ class AWQW4Packed(nn.Module):
     #     )
     #     return y
 
+
 @triton.jit
 def awq_w4_gemm_kernel(
-    X_ptr, W_ptr, SCALES_ptr, INV_S_ptr, BIAS_ptr, Y_ptr,
-    N: tl.constexpr, O: tl.constexpr, K: tl.constexpr, GROUP_SIZE: tl.constexpr,
-    stride_xn: tl.constexpr, stride_xk: tl.constexpr,
-    stride_wo: tl.constexpr, stride_wg: tl.constexpr, stride_wk2: tl.constexpr,
-    stride_so: tl.constexpr, stride_sg: tl.constexpr,
+    X_ptr,
+    W_ptr,
+    SCALES_ptr,
+    INV_S_ptr,
+    BIAS_ptr,
+    Y_ptr,
+    N: tl.constexpr,
+    O: tl.constexpr,
+    K: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    stride_xn: tl.constexpr,
+    stride_xk: tl.constexpr,
+    stride_wo: tl.constexpr,
+    stride_wg: tl.constexpr,
+    stride_wk2: tl.constexpr,
+    stride_so: tl.constexpr,
+    stride_sg: tl.constexpr,
     stride_inv: tl.constexpr,
-    stride_yn: tl.constexpr, stride_yo: tl.constexpr,
+    stride_yn: tl.constexpr,
+    stride_yo: tl.constexpr,
     HAS_BIAS: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
 ):
-
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     n0 = pid_m * BLOCK_M
@@ -867,46 +884,45 @@ def awq_w4_gemm_kernel(
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-
     # ----------------------------
     # 3) Loop over K in BLOCK_K steps
     # ----------------------------
     for k0 in tl.static_range(0, K, BLOCK_K):
-    # For each k-tile:
-    #   3.1) Load X tile
-    #       - shape: [BLOCK_M, BLOCK_K]
-    #       - mask invalid rows/cols
-    #       - cast to fp32 for math
+        # For each k-tile:
+        #   3.1) Load X tile
+        #       - shape: [BLOCK_M, BLOCK_K]
+        #       - mask invalid rows/cols
+        #       - cast to fp32 for math
         offs_k = k0 + tl.arange(0, BLOCK_K)  # [BK]
         mask_k = offs_k < K
 
         x_ptrs = X_ptr + offs_m[:, None] * stride_xn + offs_k[None, :] * stride_xk
         x = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float16)
-    #
-    #   3.2) Apply AWQ input rescale
-    #       - load INV_S for this k-range (shape [BLOCK_K])
-    #       - multiply X tile by INV_S (broadcast along M)
+        #
+        #   3.2) Apply AWQ input rescale
+        #       - load INV_S for this k-range (shape [BLOCK_K])
+        #       - multiply X tile by INV_S (broadcast along M)
         inv_ptrs = INV_S_ptr + offs_k * stride_inv
         inv = tl.load(inv_ptrs, mask=mask_k, other=0.0).to(tl.float16)
         x = x * inv[None, :]
-    #
-    #   3.3) Compute group/nibble addressing for weights
-    #       - For each k in this tile:
-    #           g  = k // GROUP_SIZE
-    #           kk = k %  GROUP_SIZE
-    #           byte_index = kk // 2     (since 2 int4 per byte)
-    #           nibble_sel = kk & 1      (0 = low nibble, 1 = high nibble)
+        #
+        #   3.3) Compute group/nibble addressing for weights
+        #       - For each k in this tile:
+        #           g  = k // GROUP_SIZE
+        #           kk = k %  GROUP_SIZE
+        #           byte_index = kk // 2     (since 2 int4 per byte)
+        #           nibble_sel = kk & 1      (0 = low nibble, 1 = high nibble)
         offs_g = offs_k // GROUP_SIZE
         offs_kk = offs_k - offs_g * GROUP_SIZE
         offs_byte = offs_kk >> 1
         nibble_sel = offs_kk & 1
-    #
-    #   3.4) Load packed weight bytes for this tile
-    #       - You want bytes corresponding to:
-    #           outputs: O tile (BLOCK_N)
-    #           k-range: this BLOCK_K
-    #       - Use strides (stride_wo, stride_wg, stride_wk2)
-    #       - Result is uint8 “packed” values
+        #
+        #   3.4) Load packed weight bytes for this tile
+        #       - You want bytes corresponding to:
+        #           outputs: O tile (BLOCK_N)
+        #           k-range: this BLOCK_K
+        #       - Use strides (stride_wo, stride_wg, stride_wk2)
+        #       - Result is uint8 “packed” values
         w_ptrs = (
             W_ptr
             + offs_o[:, None] * stride_wo
@@ -915,41 +931,41 @@ def awq_w4_gemm_kernel(
         )
         w_mask = mask_o[:, None] & mask_k[None, :]
         w_packed = tl.load(w_ptrs, mask=w_mask, other=0).to(tl.uint8)
-    #
-    #   3.5) Unpack int4 -> signed int8
-    #       - Extract low/high nibble from each byte using nibble_sel
-    #       - Convert 0..15 to signed range consistent with your packing:
-    #           * if you used two’s complement int4: map to [-8,7]
-    #           * if you used offset packing: undo the offset to [-7,7]
+        #
+        #   3.5) Unpack int4 -> signed int8
+        #       - Extract low/high nibble from each byte using nibble_sel
+        #       - Convert 0..15 to signed range consistent with your packing:
+        #           * if you used two’s complement int4: map to [-8,7]
+        #           * if you used offset packing: undo the offset to [-7,7]
         low = w_packed & 0x0F
         high = (w_packed >> 4) & 0x0F
         w_u4 = tl.where(nibble_sel[None, :] == 0, low, high)
         w_s4 = tl.where(w_u4 < 8, w_u4, w_u4 - 16)
         w_i8 = w_s4.to(tl.int8)
-    #
-    #   3.6) Load dequant scales for this tile
-    #       - scales are per-(output, group):
-    #           scale[o, g]
-    #       - For each k, pick its group g and broadcast across M
+        #
+        #   3.6) Load dequant scales for this tile
+        #       - scales are per-(output, group):
+        #           scale[o, g]
+        #       - For each k, pick its group g and broadcast across M
         scales_ptrs = SCALES_ptr + (offs_o[:, None] * stride_so) + (offs_g[None, :] * stride_sg)
         scale_ok = tl.load(
             scales_ptrs,
             mask=(mask_o[:, None] & mask_k[None, :]),
             other=0.0,
         ).to(tl.float32)
-    #
-    #   3.7) Dequantize weights
-    #       - w_fp32 = q_int8 * scale_fp32
-    #       - w_fp32 should correspond to weight values for these O and K indices
-    #
+        #
+        #   3.7) Dequantize weights
+        #       - w_fp32 = q_int8 * scale_fp32
+        #       - w_fp32 should correspond to weight values for these O and K indices
+        #
         w_fp32 = (w_i8 * scale_ok).to(tl.float16)
 
-    #   3.8) Accumulate GEMM
-    #       - acc += X_tile_fp32 @ (W_tile_fp32)^T
-    #       - Make sure shapes align:
-    #           X: [BM, BK]
-    #           W: [BN, BK]  (transpose inside dot)
-    #
+        #   3.8) Accumulate GEMM
+        #       - acc += X_tile_fp32 @ (W_tile_fp32)^T
+        #       - Make sure shapes align:
+        #           X: [BM, BK]
+        #           W: [BN, BK]  (transpose inside dot)
+        #
         acc += tl.dot(x, tl.trans(w_fp32))
     # Notes:
     #   - Keep everything fp32 inside the loop for stability
@@ -976,6 +992,7 @@ def awq_w4_gemm_kernel(
     acc = acc.to(tl.float32)
     y_ptrs = Y_ptr + offs_m[:, None] * stride_yn + offs_o[None, :] * stride_yo
     tl.store(y_ptrs, acc, mask=mask_m[:, None] & mask_o[None, :])
+
 
 def compare_outputs(
     y_ref: torch.Tensor,
@@ -1013,8 +1030,12 @@ def compare_outputs(
 
     # sanity stats
     print("\nStats:")
-    print(f"{name_ref}: min={y_ref_f.min():.4e}, max={y_ref_f.max():.4e}, mean={y_ref_f.mean():.4e}")
-    print(f"{name_test}: min={y_test_f.min():.4e}, max={y_test_f.max():.4e}, mean={y_test_f.mean():.4e}")
+    print(
+        f"{name_ref}: min={y_ref_f.min():.4e}, max={y_ref_f.max():.4e}, mean={y_ref_f.mean():.4e}"
+    )
+    print(
+        f"{name_test}: min={y_test_f.min():.4e}, max={y_test_f.max():.4e}, mean={y_test_f.mean():.4e}"
+    )
 
     # NaN / inf check
     for name, y in [(name_ref, y_ref_f), (name_test, y_test_f)]:
@@ -1028,9 +1049,11 @@ def compare_outputs(
 # Common utility functions
 # -----------------------------
 
+
 def load_model(model_name, device):
     """Load and return the model with appropriate dtype."""
     from transformers import AutoModelForCausalLM
+
     dtype = torch.float16 if device.type == "cuda" else torch.float32
     model = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype).to(device)
     model.eval()
@@ -1039,15 +1062,27 @@ def load_model(model_name, device):
 
 def create_layer_filter(layer_names):
     """Create a filter function that checks if a layer name ends with any of the specified names."""
+
     def filter_fn(name):
         return any(name.endswith(layer_name) for layer_name in layer_names)
+
     return filter_fn
 
 
-def setup_eval_data(model_name, dataset_name, dataset_config, dataset_split, batch_size, max_seq_len, evaluation_batches, seed, device):
+def setup_eval_data(
+    model_name,
+    dataset_name,
+    dataset_config,
+    dataset_split,
+    batch_size,
+    max_seq_len,
+    evaluation_batches,
+    seed,
+    device,
+):
     """Load tokenizer, prepare validation data, and create eval batches."""
-    from transformers import AutoTokenizer
     from datasets import load_dataset
+    from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 

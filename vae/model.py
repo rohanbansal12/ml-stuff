@@ -22,16 +22,16 @@ References:
 - "Taming Transformers" (Esser et al., 2021) for VAE-GAN
 """
 
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
-from dataclasses import dataclass
-import sys
-from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
-from vae.config import VAEModelConfig, DiscriminatorConfig
+from vae.config import DiscriminatorConfig, VAEModelConfig
 
 
 @dataclass
@@ -141,7 +141,7 @@ class Encoder(nn.Module):
         self.norm_out = nn.GroupNorm(config.groups, current_ch)
         self.conv_out = nn.Conv2d(current_ch, 2 * config.latent_channels, 3, padding=1)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             x: Input image (B, C, H, W)
@@ -269,7 +269,7 @@ class VAE(nn.Module):
 
         return mu + std * epsilon
 
-    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode image to latent distribution parameters."""
         return self.encoder(x)
 
@@ -311,9 +311,7 @@ class VAE(nn.Module):
         latent_w = latent_h
 
         # Sample from prior
-        z = torch.randn(
-            num_samples, self.config.latent_channels, latent_h, latent_w, device=device
-        )
+        z = torch.randn(num_samples, self.config.latent_channels, latent_h, latent_w, device=device)
 
         return self.decode(z)
 
@@ -355,9 +353,7 @@ class PatchDiscriminator(nn.Module):
         current_ch = ch
         for i in range(1, n_layers):
             out_ch = min(ch * (2**i), 512)
-            layers.append(
-                maybe_sn(nn.Conv2d(current_ch, out_ch, 4, stride=2, padding=1))
-            )
+            layers.append(maybe_sn(nn.Conv2d(current_ch, out_ch, 4, stride=2, padding=1)))
             layers.append(nn.GroupNorm(8, out_ch))
             layers.append(nn.LeakyReLU(0.2, inplace=True))
             current_ch = out_ch
@@ -397,7 +393,7 @@ class LPIPS(nn.Module):
         super().__init__()
 
         # Load pretrained VGG16
-        from torchvision.models import vgg16, VGG16_Weights
+        from torchvision.models import VGG16_Weights, vgg16
 
         vgg = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features
 
@@ -417,12 +413,8 @@ class LPIPS(nn.Module):
         self.weights = [1.0 / 5, 1.0 / 5, 1.0 / 5, 1.0 / 5, 1.0 / 5]
 
         # ImageNet normalization
-        self.register_buffer(
-            "mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-        )
-        self.register_buffer(
-            "std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-        )
+        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Normalize from [-1, 1] to ImageNet normalization."""
@@ -458,7 +450,7 @@ class LPIPS(nn.Module):
         feats_y = self._get_features(y)
 
         loss = 0.0
-        for i, (fx, fy) in enumerate(zip(feats_x, feats_y)):
+        for i, (fx, fy) in enumerate(zip(feats_x, feats_y, strict=False)):
             # Normalize features
             fx = fx / (fx.norm(dim=1, keepdim=True) + 1e-10)
             fy = fy / (fy.norm(dim=1, keepdim=True) + 1e-10)
@@ -542,9 +534,9 @@ def vae_loss(
     target: torch.Tensor,
     kl_weight: float = 1.0,
     recon_type: str = "mse",
-    lpips_model: Optional[LPIPS] = None,
+    lpips_model: LPIPS | None = None,
     lpips_weight: float = 0.0,
-) -> Tuple[torch.Tensor, dict]:
+) -> tuple[torch.Tensor, dict]:
     """
     Compute total VAE loss: L = recon_loss + β * kl_loss + λ * lpips_loss
 

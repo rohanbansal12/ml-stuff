@@ -12,23 +12,24 @@ Usage:
     python benchmark_flash_attention.py --seq_len 512 --d_model 512 --num_heads 8
 """
 
-import torch
 import argparse
-import time
-from typing import Dict, Callable
-from dataclasses import dataclass
 import sys
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+
+import torch
 
 sys.path.append(str(Path(__file__).parent.parent))
 
 from gpt.model import (
-    GPTConfig,
     GPT,
-    FlashAttentionNaive,
     FlashAttention2Naive,
-    attention_standard,
+    FlashAttentionNaive,
+    GPTConfig,
     attention_sdpa,
+    attention_standard,
 )
 
 
@@ -41,25 +42,15 @@ class BenchmarkResult:
     correct: bool
 
 
-def create_test_tensors(
-    batch_size: int, num_heads: int, seq_len: int, d_k: int, device: str
-):
+def create_test_tensors(batch_size: int, num_heads: int, seq_len: int, d_k: int, device: str):
     """Create random Q, K, V tensors for benchmarking."""
-    Q = torch.randn(
-        batch_size, num_heads, seq_len, d_k, device=device, dtype=torch.float32
-    )
-    K = torch.randn(
-        batch_size, num_heads, seq_len, d_k, device=device, dtype=torch.float32
-    )
-    V = torch.randn(
-        batch_size, num_heads, seq_len, d_k, device=device, dtype=torch.float32
-    )
+    Q = torch.randn(batch_size, num_heads, seq_len, d_k, device=device, dtype=torch.float32)
+    K = torch.randn(batch_size, num_heads, seq_len, d_k, device=device, dtype=torch.float32)
+    V = torch.randn(batch_size, num_heads, seq_len, d_k, device=device, dtype=torch.float32)
     return Q, K, V
 
 
-def benchmark_fn(
-    fn: Callable, Q, K, V, num_warmup: int = 5, num_runs: int = 20
-) -> BenchmarkResult:
+def benchmark_fn(fn: Callable, Q, K, V, num_warmup: int = 5, num_runs: int = 20) -> BenchmarkResult:
     """Benchmark a single attention function."""
     device = Q.device
 
@@ -114,16 +105,14 @@ def run_benchmarks(
     seq_len: int = 256,
     d_k: int = 64,
     device: str = "cuda",
-) -> Dict[str, BenchmarkResult]:
+) -> dict[str, BenchmarkResult]:
     """Run all attention benchmarks."""
 
     device = torch.device(device)
     Q, K, V = create_test_tensors(batch_size, num_heads, seq_len, d_k, device)
 
     # Create causal mask for standard attention
-    mask = torch.tril(torch.ones(seq_len, seq_len, device=device)).view(
-        1, 1, seq_len, seq_len
-    )
+    mask = torch.tril(torch.ones(seq_len, seq_len, device=device)).view(1, 1, seq_len, seq_len)
     dropout = torch.nn.Dropout(0.0)
 
     # Reference implementation (standard attention)
@@ -175,7 +164,7 @@ def run_benchmarks(
     return results
 
 
-def print_results(results: Dict[str, BenchmarkResult], seq_len: int, batch_size: int):
+def print_results(results: dict[str, BenchmarkResult], seq_len: int, batch_size: int):
     """Print benchmark results in a table."""
     print("\n" + "=" * 80)
     print(f"ATTENTION BENCHMARK RESULTS (seq_len={seq_len}, batch_size={batch_size})")
@@ -214,9 +203,7 @@ def benchmark_scaling(device: str = "cuda"):
     num_heads = 8
     d_k = 64
 
-    print(
-        f"{'Seq Len':<10} {'Standard':<15} {'SDPA':<15} {'Flash Naive':<15} {'Flash2 Naive':<15}"
-    )
+    print(f"{'Seq Len':<10} {'Standard':<15} {'SDPA':<15} {'Flash Naive':<15} {'Flash2 Naive':<15}")
     print("-" * 70)
 
     for seq_len in seq_lens:
@@ -299,9 +286,7 @@ def benchmark_full_model(device: str = "cuda"):
                 times.append((time.perf_counter() - start) * 1000)
 
         avg_time = sum(times) / len(times)
-        memory_mb = (
-            torch.cuda.max_memory_allocated() / 1024**2 if device == "cuda" else 0
-        )
+        memory_mb = torch.cuda.max_memory_allocated() / 1024**2 if device == "cuda" else 0
 
         results[attn_type] = (avg_time, memory_mb)
 
@@ -330,9 +315,7 @@ def main():
     parser.add_argument("--d_k", type=int, default=64)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--scaling", action="store_true", help="Run scaling benchmark")
-    parser.add_argument(
-        "--full_model", action="store_true", help="Run full model benchmark"
-    )
+    parser.add_argument("--full_model", action="store_true", help="Run full model benchmark")
 
     args = parser.parse_args()
 

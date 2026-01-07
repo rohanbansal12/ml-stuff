@@ -11,9 +11,9 @@ Prediction parameterizations:
 - v-prediction: model predicts v = √ᾱₜ·ε - √(1-ᾱₜ)·x₀
 """
 
-import torch
 import math
-from typing import Optional
+
+import torch
 from config import DiffusionConfig
 
 
@@ -60,14 +60,10 @@ class NoiseSchedule:
 
         # For posterior mean computation
         self.posterior_mean_coef1 = (
-            self.betas
-            * torch.sqrt(self.alphas_cumprod_prev)
-            / (1.0 - self.alphas_cumprod)
+            self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
         )
         self.posterior_mean_coef2 = (
-            (1.0 - self.alphas_cumprod_prev)
-            * torch.sqrt(self.alphas)
-            / (1.0 - self.alphas_cumprod)
+            (1.0 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
         )
 
         self._log_schedule_info(config.schedule_type)
@@ -91,18 +87,14 @@ class NoiseSchedule:
         """Print schedule diagnostics."""
         print(f"Noise Schedule: {schedule_type}, T={self.T}")
         print(f"  β: [{self.betas[0]:.6f}, ..., {self.betas[-1]:.6f}]")
-        print(
-            f"  ᾱ: [{self.alphas_cumprod[0]:.4f}, ..., {self.alphas_cumprod[-1]:.6f}]"
-        )
+        print(f"  ᾱ: [{self.alphas_cumprod[0]:.4f}, ..., {self.alphas_cumprod[-1]:.6f}]")
         print(f"  SNR range: [{self.snr(0):.1f}, {self.snr(self.T - 1):.4f}]")
 
     def snr(self, t: int) -> float:
         """Signal-to-noise ratio at timestep t."""
         return (self.alphas_cumprod[t] / (1 - self.alphas_cumprod[t])).item()
 
-    def gather(
-        self, values: torch.Tensor, t: torch.Tensor, shape: tuple
-    ) -> torch.Tensor:
+    def gather(self, values: torch.Tensor, t: torch.Tensor, shape: tuple) -> torch.Tensor:
         """Gather values at timesteps t and reshape for broadcasting."""
         out = values.gather(0, t)
         return out.view(-1, *([1] * (len(shape) - 1)))
@@ -116,7 +108,7 @@ def q_sample(
     x0: torch.Tensor,
     t: torch.Tensor,
     schedule: NoiseSchedule,
-    noise: Optional[torch.Tensor] = None,
+    noise: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Forward diffusion: sample x_t given x_0.
@@ -126,9 +118,7 @@ def q_sample(
         noise = torch.randn_like(x0)
 
     sqrt_alpha_bar = schedule.gather(schedule.sqrt_alphas_cumprod, t, x0.shape)
-    sqrt_one_minus_alpha_bar = schedule.gather(
-        schedule.sqrt_one_minus_alphas_cumprod, t, x0.shape
-    )
+    sqrt_one_minus_alpha_bar = schedule.gather(schedule.sqrt_one_minus_alphas_cumprod, t, x0.shape)
 
     return sqrt_alpha_bar * x0 + sqrt_one_minus_alpha_bar * noise
 
@@ -179,9 +169,7 @@ def predict_x0_from_output(
     """
     shape = x_t.shape
     sqrt_alpha_bar = schedule.gather(schedule.sqrt_alphas_cumprod, t, shape)
-    sqrt_one_minus_alpha_bar = schedule.gather(
-        schedule.sqrt_one_minus_alphas_cumprod, t, shape
-    )
+    sqrt_one_minus_alpha_bar = schedule.gather(schedule.sqrt_one_minus_alphas_cumprod, t, shape)
 
     if pred_type == "eps":
         eps_pred = model_out
@@ -240,9 +228,7 @@ class DDPMSampler:
         # Compute posterior mean using the eps parameterization
         # μ_θ = (1/√αₜ)(x_t - βₜ·ε_θ/√(1-ᾱₜ))
         shape = x_t.shape
-        sqrt_recip_alpha = self.schedule.gather(
-            self.schedule.sqrt_recip_alphas, t_tensor, shape
-        )
+        sqrt_recip_alpha = self.schedule.gather(self.schedule.sqrt_recip_alphas, t_tensor, shape)
         beta = self.schedule.gather(self.schedule.betas, t_tensor, shape)
         sqrt_one_minus_alpha_bar = self.schedule.gather(
             self.schedule.sqrt_one_minus_alphas_cumprod, t_tensor, shape
@@ -251,9 +237,7 @@ class DDPMSampler:
         mu = sqrt_recip_alpha * (x_t - beta * eps_pred / sqrt_one_minus_alpha_bar)
 
         if t > 0:
-            posterior_var = self.schedule.gather(
-                self.schedule.posterior_variance, t_tensor, shape
-            )
+            posterior_var = self.schedule.gather(self.schedule.posterior_variance, t_tensor, shape)
             noise = torch.randn_like(x_t)
             x_prev = mu + torch.sqrt(posterior_var) * noise
         else:
@@ -267,7 +251,7 @@ class DDPMSampler:
         model: torch.nn.Module,
         shape: tuple,
         device: torch.device,
-        x_T: Optional[torch.Tensor] = None,
+        x_T: torch.Tensor | None = None,
         progress: bool = False,
     ) -> torch.Tensor:
         """Full reverse diffusion: x_T → x_0."""
@@ -314,9 +298,7 @@ class DDIMSampler:
         self.timesteps = torch.arange(0, schedule.T, step_ratio).flip(0)
 
     @torch.no_grad()
-    def step(
-        self, model: torch.nn.Module, x_t: torch.Tensor, t: int, t_prev: int
-    ) -> torch.Tensor:
+    def step(self, model: torch.nn.Module, x_t: torch.Tensor, t: int, t_prev: int) -> torch.Tensor:
         """Single DDIM step from t to t_prev."""
         batch_size = x_t.size(0)
         device = x_t.device
@@ -331,16 +313,12 @@ class DDIMSampler:
 
         # Get alpha values
         alpha_bar_t = self.schedule.alphas_cumprod[t]
-        alpha_bar_prev = (
-            self.schedule.alphas_cumprod[t_prev] if t_prev >= 0 else torch.tensor(1.0)
-        )
+        alpha_bar_prev = self.schedule.alphas_cumprod[t_prev] if t_prev >= 0 else torch.tensor(1.0)
 
         # DDIM update
         # σ_t = η · √((1-ᾱ_{t-1})/(1-ᾱ_t)) · √(1 - ᾱ_t/ᾱ_{t-1})
         sigma = self.eta * torch.sqrt(
-            (1 - alpha_bar_prev)
-            / (1 - alpha_bar_t)
-            * (1 - alpha_bar_t / alpha_bar_prev)
+            (1 - alpha_bar_prev) / (1 - alpha_bar_t) * (1 - alpha_bar_t / alpha_bar_prev)
         )
 
         # Direction pointing to x_t
@@ -361,7 +339,7 @@ class DDIMSampler:
         model: torch.nn.Module,
         shape: tuple,
         device: torch.device,
-        x_T: Optional[torch.Tensor] = None,
+        x_T: torch.Tensor | None = None,
         progress: bool = False,
     ) -> torch.Tensor:
         """DDIM sampling with fewer steps."""
@@ -375,7 +353,7 @@ class DDIMSampler:
         timesteps = self.timesteps.tolist()
         timesteps_prev = timesteps[1:] + [-1]
 
-        pairs = list(zip(timesteps, timesteps_prev))
+        pairs = list(zip(timesteps, timesteps_prev, strict=False))
         if progress:
             from tqdm import tqdm
 

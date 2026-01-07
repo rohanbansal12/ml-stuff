@@ -8,10 +8,11 @@ Architecture follows the original DDPM paper with some improvements:
 - Skip connections between encoder and decoder
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 from config import ModelConfig
 
 
@@ -163,14 +164,10 @@ class DownBlock(nn.Module):
         for i in range(num_blocks):
             ch_in = in_channels if i == 0 else out_channels
             self.blocks.append(ResBlock(ch_in, out_channels, time_dim, groups, dropout))
-            self.attns.append(
-                SelfAttention2d(out_channels) if use_attn else nn.Identity()
-            )
+            self.attns.append(SelfAttention2d(out_channels) if use_attn else nn.Identity())
 
         if downsample:
-            self.downsample = nn.Conv2d(
-                out_channels, out_channels, 3, stride=2, padding=1
-            )
+            self.downsample = nn.Conv2d(out_channels, out_channels, 3, stride=2, padding=1)
         else:
             self.downsample = None
 
@@ -180,7 +177,7 @@ class DownBlock(nn.Module):
         """Returns (skip_connections, downsampled_output)."""
         skips = []
 
-        for block, attn in zip(self.blocks, self.attns):
+        for block, attn in zip(self.blocks, self.attns, strict=False):
             x = block(x, t_emb)
             x = attn(x)
             skips.append(x)
@@ -226,9 +223,7 @@ class UpBlock(nn.Module):
             else:
                 ch_in = out_channels
             self.blocks.append(ResBlock(ch_in, out_channels, time_dim, groups, dropout))
-            self.attns.append(
-                SelfAttention2d(out_channels) if use_attn else nn.Identity()
-            )
+            self.attns.append(SelfAttention2d(out_channels) if use_attn else nn.Identity())
 
     def forward(
         self, x: torch.Tensor, skips: list[torch.Tensor], t_emb: torch.Tensor
@@ -236,7 +231,7 @@ class UpBlock(nn.Module):
         if self.upsample is not None:
             x = self.upsample(x)
 
-        for i, (block, attn) in enumerate(zip(self.blocks, self.attns)):
+        for i, (block, attn) in enumerate(zip(self.blocks, self.attns, strict=False)):
             # Concatenate with corresponding skip connection
             skip = skips[-(i + 1)]
             x = torch.cat([x, skip], dim=1) if i == 0 else x
@@ -260,9 +255,7 @@ class UNet(nn.Module):
     Time conditioning is injected into every ResBlock.
     """
 
-    def __init__(
-        self, config: ModelConfig, in_channels: int = 3, out_channels: int = 3
-    ):
+    def __init__(self, config: ModelConfig, in_channels: int = 3, out_channels: int = 3):
         super().__init__()
         self.config = config
 
@@ -311,9 +304,7 @@ class UNet(nn.Module):
 
         # Bottleneck
         self.mid_block1 = ResBlock(current_ch, current_ch, time_dim, groups, dropout)
-        self.mid_attn = (
-            SelfAttention2d(current_ch) if config.use_bottleneck_attn else nn.Identity()
-        )
+        self.mid_attn = SelfAttention2d(current_ch) if config.use_bottleneck_attn else nn.Identity()
         self.mid_block2 = ResBlock(current_ch, current_ch, time_dim, groups, dropout)
 
         # Decoder

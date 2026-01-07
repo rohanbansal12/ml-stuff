@@ -8,10 +8,10 @@ Key difference: We may need to scale the latents to have unit variance
 for optimal diffusion training.
 """
 
+import math
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional
 from config import LatentDiffusionConfig
 from tqdm import tqdm
 
@@ -71,14 +71,10 @@ class NoiseSchedule:
         self.posterior_log_variance = torch.log(self.posterior_variance)
 
         self.posterior_mean_coef1 = (
-            self.betas
-            * torch.sqrt(self.alphas_cumprod_prev)
-            / (1.0 - self.alphas_cumprod)
+            self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
         )
         self.posterior_mean_coef2 = (
-            (1.0 - self.alphas_cumprod_prev)
-            * torch.sqrt(self.alphas)
-            / (1.0 - self.alphas_cumprod)
+            (1.0 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
         )
 
     def _cosine_schedule(self, T: int, s: float, max_beta: float) -> torch.Tensor:
@@ -109,9 +105,7 @@ class NoiseSchedule:
         betas = 1.0 - alphas
         return betas.clamp(min=1e-8, max=max_beta)
 
-    def gather(
-        self, values: torch.Tensor, t: torch.Tensor, shape: tuple
-    ) -> torch.Tensor:
+    def gather(self, values: torch.Tensor, t: torch.Tensor, shape: tuple) -> torch.Tensor:
         """
         Gather values at timestep indices and reshape for broadcasting.
 
@@ -143,7 +137,7 @@ def q_sample(
     z_0: torch.Tensor,
     t: torch.Tensor,
     schedule: NoiseSchedule,
-    noise: Optional[torch.Tensor] = None,
+    noise: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Forward diffusion process: sample z_t given z_0.
@@ -167,9 +161,7 @@ def q_sample(
     if noise is None:
         noise = torch.randn_like(z_0)
 
-    sqrt_alpha_bar = schedule.gather(
-        values=schedule.sqrt_alphas_cumprod, t=t, shape=z_0.shape
-    )
+    sqrt_alpha_bar = schedule.gather(values=schedule.sqrt_alphas_cumprod, t=t, shape=z_0.shape)
     sqrt_one_minus_alpha_bar = schedule.gather(
         values=schedule.sqrt_one_minus_alphas_cumprod, t=t, shape=z_0.shape
     )
@@ -213,9 +205,7 @@ def get_target(
     elif pred_type == "x0":
         return z_0
     elif pred_type == "v":
-        sqrt_alpha_bar = schedule.gather(
-            values=schedule.sqrt_alphas_cumprod, t=t, shape=z_0.shape
-        )
+        sqrt_alpha_bar = schedule.gather(values=schedule.sqrt_alphas_cumprod, t=t, shape=z_0.shape)
         sqrt_one_minus_alpha_bar = schedule.gather(
             values=schedule.sqrt_one_minus_alphas_cumprod, t=t, shape=z_0.shape
         )
@@ -264,9 +254,7 @@ def predict_z0_from_output(
     Raises:
         ValueError: If pred_type is not recognized.
     """
-    sqrt_alpha_bar = schedule.gather(
-        values=schedule.sqrt_alphas_cumprod, t=t, shape=z_t.shape
-    )
+    sqrt_alpha_bar = schedule.gather(values=schedule.sqrt_alphas_cumprod, t=t, shape=z_t.shape)
     sqrt_one_minus_alpha_bar = schedule.gather(
         values=schedule.sqrt_one_minus_alphas_cumprod, t=t, shape=z_t.shape
     )
@@ -336,7 +324,7 @@ class DDPMSampler:
         model: nn.Module,
         z_t: torch.Tensor,
         t: int,
-        class_labels: Optional[torch.Tensor] = None,
+        class_labels: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Single reverse diffusion step from t to t-1.
@@ -368,17 +356,11 @@ class DDPMSampler:
         if self.guidance_scale > 0 and class_labels is not None:
             # Classifier-free guidance: run model twice
             # Conditional prediction
-            model_out_cond = model(
-                z_t, t_tensor, class_labels=class_labels, drop_class=False
-            )
+            model_out_cond = model(z_t, t_tensor, class_labels=class_labels, drop_class=False)
             # Unconditional prediction
-            model_out_uncond = model(
-                z_t, t_tensor, class_labels=class_labels, drop_class=True
-            )
+            model_out_uncond = model(z_t, t_tensor, class_labels=class_labels, drop_class=True)
             # CFG combination
-            model_out = model_out_uncond + self.guidance_scale * (
-                model_out_cond - model_out_uncond
-            )
+            model_out = model_out_uncond + self.guidance_scale * (model_out_cond - model_out_uncond)
         else:
             # No guidance - single forward pass
             model_out = model(z_t, t_tensor, class_labels=class_labels)
@@ -388,9 +370,7 @@ class DDPMSampler:
         )
 
         shape = z_t.shape
-        sqrt_recip_alpha = self.schedule.gather(
-            self.schedule.sqrt_recip_alphas, t_tensor, shape
-        )
+        sqrt_recip_alpha = self.schedule.gather(self.schedule.sqrt_recip_alphas, t_tensor, shape)
         beta = self.schedule.gather(self.schedule.betas, t_tensor, shape)
         sqrt_one_minus_alpha_bar = self.schedule.gather(
             self.schedule.sqrt_one_minus_alphas_cumprod, t_tensor, shape
@@ -400,9 +380,7 @@ class DDPMSampler:
         mu = sqrt_recip_alpha * (z_t - beta * eps_pred / sqrt_one_minus_alpha_bar)
 
         if t > 0:
-            posterior_var = self.schedule.gather(
-                self.schedule.posterior_variance, t_tensor, shape
-            )
+            posterior_var = self.schedule.gather(self.schedule.posterior_variance, t_tensor, shape)
             noise = torch.randn_like(z_t)
             z_prev = mu + torch.sqrt(posterior_var) * noise
         else:
@@ -416,8 +394,8 @@ class DDPMSampler:
         model: nn.Module,
         shape: tuple,
         device: torch.device,
-        z_T: Optional[torch.Tensor] = None,
-        class_labels: Optional[torch.Tensor] = None,
+        z_T: torch.Tensor | None = None,
+        class_labels: torch.Tensor | None = None,
         progress: bool = False,
     ) -> torch.Tensor:
         """
@@ -504,7 +482,7 @@ class DDIMSampler:
         z_t: torch.Tensor,
         t: int,
         t_prev: int,
-        class_labels: Optional[torch.Tensor] = None,
+        class_labels: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Single DDIM step from timestep t to t_prev.
@@ -534,15 +512,9 @@ class DDIMSampler:
         # Get model prediction (with optional CFG)
         if self.guidance_scale > 0 and class_labels is not None:
             # Classifier-free guidance: run model twice
-            model_out_cond = model(
-                z_t, t_tensor, class_labels=class_labels, drop_class=False
-            )
-            model_out_uncond = model(
-                z_t, t_tensor, class_labels=class_labels, drop_class=True
-            )
-            model_out = model_out_uncond + self.guidance_scale * (
-                model_out_cond - model_out_uncond
-            )
+            model_out_cond = model(z_t, t_tensor, class_labels=class_labels, drop_class=False)
+            model_out_uncond = model(z_t, t_tensor, class_labels=class_labels, drop_class=True)
+            model_out = model_out_uncond + self.guidance_scale * (model_out_cond - model_out_uncond)
         else:
             model_out = model(z_t, t_tensor, class_labels=class_labels)
 
@@ -565,9 +537,7 @@ class DDIMSampler:
 
         # Compute sigma for stochasticity
         sigma = self.eta * torch.sqrt(
-            (1 - alpha_bar_prev)
-            / (1 - alpha_bar_t)
-            * (1 - alpha_bar_t / alpha_bar_prev)
+            (1 - alpha_bar_prev) / (1 - alpha_bar_t) * (1 - alpha_bar_t / alpha_bar_prev)
         )
 
         # DDIM update: "predicted x0" direction + "pointing to x_t" direction
@@ -587,8 +557,8 @@ class DDIMSampler:
         model: nn.Module,
         shape: tuple,
         device: torch.device,
-        z_T: Optional[torch.Tensor] = None,
-        class_labels: Optional[torch.Tensor] = None,
+        z_T: torch.Tensor | None = None,
+        class_labels: torch.Tensor | None = None,
         progress: bool = False,
     ) -> torch.Tensor:
         """
@@ -615,13 +585,11 @@ class DDIMSampler:
         timesteps = self.timesteps.tolist()
         timesteps_prev = timesteps[1:] + [-1]  # -1 indicates final step (t=0 target)
 
-        pairs = list(zip(timesteps, timesteps_prev))
+        pairs = list(zip(timesteps, timesteps_prev, strict=False))
         if progress:
             pairs = tqdm(pairs, desc=f"DDIM Sampling ({len(timesteps)} steps)")
 
         for t, t_prev in pairs:
-            z_t = self.step(
-                model, z_t=z_t, t=t, t_prev=t_prev, class_labels=class_labels
-            )
+            z_t = self.step(model, z_t=z_t, t=t, t_prev=t_prev, class_labels=class_labels)
 
         return z_t

@@ -1,17 +1,22 @@
 import torch
 import torch.nn as nn
 
+
 class BasicBlock(nn.Module):
     expansion = 1
 
     def __init__(self, in_channels, out_channels, stride=1, downsample=None, normalize=True):
         super().__init__()
-        
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+
+        self.conv1 = nn.Conv2d(
+            in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False
+        )
         self.bn1 = nn.BatchNorm2d(out_channels) if normalize else nn.Identity()
         self.relu = nn.ReLU(inplace=True)
 
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(
+            out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False
+        )
         self.bn2 = nn.BatchNorm2d(out_channels) if normalize else nn.Identity()
 
         self.downsample = downsample
@@ -27,6 +32,7 @@ class BasicBlock(nn.Module):
         out = self.relu(out + identity)
         return out
 
+
 class Bottleneck(nn.Module):
     expansion = 4
 
@@ -37,10 +43,14 @@ class Bottleneck(nn.Module):
         self.bn1 = nn.BatchNorm2d(out_channels) if normalize else nn.Identity()
         self.relu = nn.ReLU(inplace=True)
 
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(
+            out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False
+        )
         self.bn2 = nn.BatchNorm2d(out_channels) if normalize else nn.Identity()
 
-        self.conv3 = nn.Conv2d(out_channels, out_channels * self.expansion, kernel_size=1, stride=1, bias=False)
+        self.conv3 = nn.Conv2d(
+            out_channels, out_channels * self.expansion, kernel_size=1, stride=1, bias=False
+        )
         self.bn3 = nn.BatchNorm2d(out_channels * self.expansion) if normalize else nn.Identity()
 
         self.downsample = downsample
@@ -59,10 +69,9 @@ class Bottleneck(nn.Module):
 
 
 class ResNet(nn.Module):
-
     def __init__(self, block, layers, num_classes=10, normalize=True):
         super().__init__()
-        
+
         self.in_channels = 64
         self.normalize = normalize
 
@@ -97,25 +106,51 @@ class ResNet(nn.Module):
     def _make_layer(self, block, out_channels, blocks, stride):
         downsample = None
         if stride != 1 or self.in_channels != out_channels * block.expansion:
-            downsample = nn.Sequential(*[
-                nn.Conv2d(self.in_channels, out_channels * block.expansion, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels * block.expansion)
-            ])
+            downsample = nn.Sequential(
+                *[
+                    nn.Conv2d(
+                        self.in_channels,
+                        out_channels * block.expansion,
+                        kernel_size=1,
+                        stride=stride,
+                        bias=False,
+                    ),
+                    nn.BatchNorm2d(out_channels * block.expansion),
+                ]
+            )
 
         layers = []
-        layers.append(block(self.in_channels, out_channels, stride=stride, downsample=downsample, normalize=self.normalize))
+        layers.append(
+            block(
+                self.in_channels,
+                out_channels,
+                stride=stride,
+                downsample=downsample,
+                normalize=self.normalize,
+            )
+        )
         self.in_channels = out_channels * block.expansion
-        
+
         for _ in range(1, blocks):
-            layers.append(block(self.in_channels, out_channels, stride=1, downsample=None, normalize=self.normalize))
+            layers.append(
+                block(
+                    self.in_channels,
+                    out_channels,
+                    stride=1,
+                    downsample=None,
+                    normalize=self.normalize,
+                )
+            )
         return nn.Sequential(*layers)
-    
+
 
 def resnet18(num_classes=10, normalize=True):
     return ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes, normalize=normalize)
 
+
 def resnet34(num_classes=10, normalize=True):
     return ResNet(BasicBlock, [3, 4, 6, 3], num_classes=num_classes, normalize=normalize)
+
 
 def resnet50(num_classes=10, normalize=True):
     return ResNet(Bottleneck, [3, 4, 6, 3], num_classes=num_classes, normalize=normalize)

@@ -2,14 +2,16 @@
 # GPT-2 style byte-level BPE
 # =========================
 from collections import Counter
-from typing import List, Dict, Tuple
 
 # ----- Byte <-> Unicode mapping (GPT-2 style) -----
 
+
 def bytes_to_unicode():
-    bs = list(range(ord("!"), ord("~")+1)) \
-       + list(range(ord("¡"), ord("¬")+1)) \
-       + list(range(ord("®"), ord("ÿ")+1))
+    bs = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
     cs = bs[:]
     n = 0
     for b in range(2**8):
@@ -18,22 +20,23 @@ def bytes_to_unicode():
             cs.append(2**8 + n)
             n += 1
     cs = [chr(n) for n in cs]
-    return dict(zip(bs, cs))
+    return dict(zip(bs, cs, strict=False))
 
-BYTE_TO_UNICODE: Dict[int, str] = bytes_to_unicode()
-UNICODE_TO_BYTE: Dict[str, int] = {v: k for k, v in BYTE_TO_UNICODE.items()}
+
+BYTE_TO_UNICODE: dict[int, str] = bytes_to_unicode()
+UNICODE_TO_BYTE: dict[str, int] = {v: k for k, v in BYTE_TO_UNICODE.items()}
 
 
 def text_to_gpt_chars(text: str) -> str:
     """UTF-8 text -> GPT-style 'alphabet string' (1 char per byte)."""
-    b = text.encode('utf-8')
+    b = text.encode("utf-8")
     return "".join(BYTE_TO_UNICODE[byte] for byte in b)
 
 
 def gpt_chars_to_text(s: str) -> str:
     """GPT-style 'alphabet string' -> UTF-8 text."""
     b = bytes([UNICODE_TO_BYTE[c] for c in s])
-    return b.decode("utf-8", errors='replace')
+    return b.decode("utf-8", errors="replace")
 
 
 class GPT2BPE:
@@ -47,12 +50,12 @@ class GPT2BPE:
 
         # vocab maps token string -> integer id.
         # token strings are *GPT-char strings* (possibly multi-char).
-        self.token_to_id: Dict[str, int] = {}
-        self.id_to_token: Dict[int, str] = {}
+        self.token_to_id: dict[str, int] = {}
+        self.id_to_token: dict[int, str] = {}
 
         # BPE merge rules: list of pairs of token-strings, in order
-        self.merges: List[Tuple[str, str]] = []
-        self.merge_ranks: Dict[Tuple[str, str], int] = {}
+        self.merges: list[tuple[str, str]] = []
+        self.merge_ranks: dict[tuple[str, str], int] = {}
 
         self.trained = False
 
@@ -68,7 +71,7 @@ class GPT2BPE:
 
     # ----- BPE training helpers -----
 
-    def _get_pair_stats(self, corpus_tokens: List[List[str]]) -> Counter:
+    def _get_pair_stats(self, corpus_tokens: list[list[str]]) -> Counter:
         """
         Count frequency of adjacent token pairs over the whole corpus.
 
@@ -78,15 +81,15 @@ class GPT2BPE:
         pair_counts = Counter()
         for sent in corpus_tokens:
             for i in range(0, len(sent) - 1):
-                pair_counts[(sent[i], sent[i+1])] += 1
+                pair_counts[(sent[i], sent[i + 1])] += 1
         return pair_counts
 
     def _merge_pair_in_corpus(
         self,
-        corpus_tokens: List[List[str]],
-        pair: Tuple[str, str],
+        corpus_tokens: list[list[str]],
+        pair: tuple[str, str],
         new_token: str,
-    ) -> List[List[str]]:
+    ) -> list[list[str]]:
         """
         Replace all occurrences of 'pair' with 'new_token' in corpus_tokens.
         Return a new corpus_tokens list.
@@ -96,19 +99,20 @@ class GPT2BPE:
             cur = []
             i = 0
             while i < len(sent) - 1:
-                if (sent[i], sent[i+1]) == pair:
+                if (sent[i], sent[i + 1]) == pair:
                     cur.append(new_token)
                     i += 2
                 else:
                     cur.append(sent[i])
                     i += 1
-            if i == len(sent) - 1: cur.append(sent[-1])
+            if i == len(sent) - 1:
+                cur.append(sent[-1])
             new_corpus_tokens.append(cur)
         return new_corpus_tokens
 
     # ----- Training -----
 
-    def train(self, texts: List[str]):
+    def train(self, texts: list[str]):
         """
         Train BPE merges from a list of raw text strings.
         Steps:
@@ -125,7 +129,7 @@ class GPT2BPE:
         self._init_base_vocab()
 
         # 2) corpus as lists of "tokens" (initially single GPT-chars)
-        corpus_tokens: List[List[str]] = []
+        corpus_tokens: list[list[str]] = []
         for text in texts:
             g = text_to_gpt_chars(text)
             corpus_tokens.append(list(g))
@@ -154,7 +158,7 @@ class GPT2BPE:
 
     # ----- Encoding / decoding -----
 
-    def _bpe_tokenize_chars(self, s: str) -> List[str]:
+    def _bpe_tokenize_chars(self, s: str) -> list[str]:
         """
         Apply learned BPE merges to a GPT-char string, producing a list of token strings.
         This is the greedy "merge best pairs first" procedure.
@@ -162,26 +166,26 @@ class GPT2BPE:
         tokens = list(s)
         while True:
             best_pair = None
-            best_rank = float('inf')
+            best_rank = float("inf")
 
             # find best-ranked pair among adjacent pairs
             for i in range(len(tokens) - 1):
-                pair = (tokens[i], tokens[i+1])
-                rank = self.merge_ranks.get(pair, float('inf'))
+                pair = (tokens[i], tokens[i + 1])
+                rank = self.merge_ranks.get(pair, float("inf"))
                 if rank < best_rank:
                     best_rank = rank
                     best_pair = pair
 
             # no merge applies → stop
-            if best_rank == float('inf'):
+            if best_rank == float("inf"):
                 break
 
             # merge ALL occurrences of best_pair
             new_tokens = []
             i = 0
             while i < len(tokens) - 1:
-                if (tokens[i], tokens[i+1]) == best_pair:
-                    new_tokens.append(tokens[i] + tokens[i+1])
+                if (tokens[i], tokens[i + 1]) == best_pair:
+                    new_tokens.append(tokens[i] + tokens[i + 1])
                     i += 2
                 else:
                     new_tokens.append(tokens[i])
@@ -195,8 +199,7 @@ class GPT2BPE:
 
         return tokens
 
-
-    def encode(self, text: str) -> List[int]:
+    def encode(self, text: str) -> list[int]:
         """
         Text -> list of token IDs.
         """
@@ -207,7 +210,7 @@ class GPT2BPE:
         token_strs = self._bpe_tokenize_chars(g)
         return [self.token_to_id[x] for x in token_strs]
 
-    def decode(self, ids: List[int]) -> str:
+    def decode(self, ids: list[int]) -> str:
         """
         List of token IDs -> text.
         """

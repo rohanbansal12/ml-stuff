@@ -1,25 +1,23 @@
+import copy
+import sys
+
 import torch
 import torch.nn as nn
-import copy
-
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from ptq_utils import (
-    evaluate_simple,
-    get_batch_1d,
-    force_fp32_gemm_all_linears,
-    include,
-    exclude,
     ActChannelCalibrator,
     attach_linear_input_hooks,
-    set_module_by_name
+    evaluate_simple,
+    exclude,
+    force_fp32_gemm_all_linears,
+    get_batch_1d,
+    include,
+    set_module_by_name,
 )
 from quantize import calc_qparams_symmetric, quantize_symmetric
-
-import sys
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.append(".")
 from GPT.utils import load_shakespeare  # reuse your local shakespeare loader
-
 
 # -----------------------------
 # Config (tune for your 4090)
@@ -38,6 +36,7 @@ SEED = 25
 # local text file (reuse your existing path)
 TEXT_PATH = "/workspace/ml-stuff/data/shakespeare.txt"
 
+
 def summarize_scale(scale_stats, k=5):
     # scale_stats: name -> tensor[1, in] or [in]
     vals = []
@@ -48,6 +47,7 @@ def summarize_scale(scale_stats, k=5):
     print("Top scale max:")
     for t in vals[:k]:
         print(f"{t[0]:60s}  min={t[1]:.3e}  med={t[2]:.3e}  max={t[3]:.3e}")
+
 
 @torch.no_grad()
 def compute_weight_channel_stats(model, include=None, exclude=None):
@@ -65,6 +65,7 @@ def compute_weight_channel_stats(model, include=None, exclude=None):
         weight_stats[name] = w_absmax.cpu()
 
     return weight_stats
+
 
 @torch.no_grad()
 def compute_act_channel_stats(
@@ -91,6 +92,7 @@ def compute_act_channel_stats(
 
     return calib.stats
 
+
 def compute_smooth_scale(act_stats, weight_stats, alpha=0.5, smin=None, smax=None, eps=1e-8):
     smooth_params = {}
 
@@ -114,6 +116,7 @@ def compute_smooth_scale(act_stats, weight_stats, alpha=0.5, smin=None, smax=Non
 
     return smooth_params
 
+
 def quantize_model_smooth_dynamic(model, scale_stats, include, exclude):
     # gather first (avoid mutating while iterating)
     to_replace = []
@@ -132,10 +135,9 @@ def quantize_model_smooth_dynamic(model, scale_stats, include, exclude):
 
     return model, sat_stats
 
+
 class SmoothQuantDynamic(nn.Module):
-    def __init__(
-        self, in_features: int, out_features: int, has_bias: bool
-    ):
+    def __init__(self, in_features: int, out_features: int, has_bias: bool):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -165,9 +167,7 @@ class SmoothQuantDynamic(nn.Module):
         has_bias = layer.bias is not None
         device = layer.weight.device
 
-        q = cls(in_features=in_f, out_features=out_f, has_bias=has_bias).to(
-            device
-        )
+        q = cls(in_features=in_f, out_features=out_f, has_bias=has_bias).to(device)
 
         # weights: symmetric per-output-channel
         W_s = (layer.weight * scale.to(device)).float()
@@ -192,9 +192,7 @@ class SmoothQuantDynamic(nn.Module):
         orig_dtype = x.dtype
         x = x / self.scale
         x_fp = x.float()
-        s_x, zp_x = calc_qparams_symmetric(
-                x_fp, bits=8, per_channel=False, axis=None, qmax=127
-            )
+        s_x, zp_x = calc_qparams_symmetric(x_fp, bits=8, per_channel=False, axis=None, qmax=127)
         x_q, x_clip = quantize_symmetric(x_fp, s_x, 127, dtype=torch.int8)
 
         x_centered = x_q.float() - zp_x.float()
@@ -205,6 +203,7 @@ class SmoothQuantDynamic(nn.Module):
             y = y + self.bias.to(y.dtype)
 
         return y.to(orig_dtype)
+
 
 # -----------------------------
 # Main
@@ -256,12 +255,11 @@ def main():
     loss, perp = evaluate_simple(fp32g_model, full_eval_data)
     print(f"FP32:    Loss:{loss:.6f} | Perp:{perp:.6f}")
 
-
     act_stats = compute_act_channel_stats(
         fp_model, val_tokens, BATCH_SIZE, MAX_SEQ_LEN, device, 10, include, exclude
     )
     weight_stats = compute_weight_channel_stats(fp_model, include, exclude)
-    alphas = [.1, .25, .5, .75, .9]
+    alphas = [0.1, 0.25, 0.5, 0.75, 0.9]
 
     for alpha in alphas:
         q_model = AutoModelForCausalLM.from_pretrained(
@@ -284,10 +282,9 @@ def main():
         # print(scale_stats[name].shape)
 
         q_loss, q_ppl = evaluate_simple(q_model, full_eval_data)
-        print(
-            f"SmoothQuant Dynamic, alpha={alpha}:    Loss:{q_loss:.6f} | Perp:{q_ppl:.6f}"
-        )
+        print(f"SmoothQuant Dynamic, alpha={alpha}:    Loss:{q_loss:.6f} | Perp:{q_ppl:.6f}")
         # break
+
 
 if __name__ == "__main__":
     main()

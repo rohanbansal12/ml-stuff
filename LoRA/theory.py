@@ -1,18 +1,21 @@
-import torch
-import torch.nn.functional as F
 import argparse
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import matplotlib.pyplot as plt
-import os
-from pathlib import Path
-import math
+import torch
+import torch.nn.functional as F
+
 
 def _fro(x: torch.Tensor) -> torch.Tensor:
     return torch.linalg.norm(x, ord="fro")
 
-def _rescale_to_alpha(eps: torch.Tensor, W_star: torch.Tensor, alpha: float, eps_floor: float = 1e-12) -> torch.Tensor:
+
+def _rescale_to_alpha(
+    eps: torch.Tensor, W_star: torch.Tensor, alpha: float, eps_floor: float = 1e-12
+) -> torch.Tensor:
     """
     Rescale eps so that ||eps||_F == alpha * ||W_star||_F.
     """
@@ -23,11 +26,13 @@ def _rescale_to_alpha(eps: torch.Tensor, W_star: torch.Tensor, alpha: float, eps
     cur = _fro(eps).clamp_min(eps_floor)
     return eps * (target / cur)
 
+
 def noise_gaussian_like(W_star: torch.Tensor) -> torch.Tensor:
     """
     Isotropic iid Gaussian noise, unscaled.
     """
     return torch.randn_like(W_star)
+
 
 def noise_low_rank(W_star: torch.Tensor, k: int) -> torch.Tensor:
     """
@@ -42,6 +47,7 @@ def noise_low_rank(W_star: torch.Tensor, k: int) -> torch.Tensor:
     V = torch.randn((k, d_in), device=W_star.device, dtype=W_star.dtype)
     return U @ V
 
+
 def noise_spectral(W_star: torch.Tensor, p: float = 1.5, sigma0: float = 1.0) -> torch.Tensor:
     """
     Full-rank but low-effective-rank noise with power-law singular values:
@@ -54,7 +60,7 @@ def noise_spectral(W_star: torch.Tensor, p: float = 1.5, sigma0: float = 1.0) ->
 
     # Random orthonormal U, V via QR
     U0 = torch.randn((d_out, m), device=W_star.device, dtype=W_star.dtype)
-    V0 = torch.randn((d_in,  m), device=W_star.device, dtype=W_star.dtype)
+    V0 = torch.randn((d_in, m), device=W_star.device, dtype=W_star.dtype)
 
     U, _ = torch.linalg.qr(U0, mode="reduced")  # (d_out, m)
     V, _ = torch.linalg.qr(V0, mode="reduced")  # (d_in,  m)
@@ -67,6 +73,7 @@ def noise_spectral(W_star: torch.Tensor, p: float = 1.5, sigma0: float = 1.0) ->
     # U @ (diag(s) @ V^T) == (U * s) @ V^T
     eps = (U * s) @ V.T  # (d_out, d_in)
     return eps
+
 
 def make_W0_from_Wstar(W_star: torch.Tensor, args):
     """
@@ -102,8 +109,9 @@ def make_W0_from_Wstar(W_star: torch.Tensor, args):
     W_0 = (W_star + eps).detach()  # frozen
     return W_0, eps
 
+
 N = 10000
-idx_split = int(.8 * N)
+idx_split = int(0.8 * N)
 d_in = 64
 d_out = 64
 
@@ -113,6 +121,7 @@ lr = 1e-2
 
 ranks = [0] + [2**i for i in range(0, 7)]
 X = torch.randn((N, d_in))
+
 
 def make_run_name(args):
     # Teacher
@@ -135,6 +144,7 @@ def make_run_name(args):
 
     return "__".join(parts)
 
+
 def best_rank_r_fro_error_sq(r, s_star, suffix_sums) -> float:
     # r can be 0..min(d_out, d_in)
     m = s_star.numel()
@@ -143,6 +153,7 @@ def best_rank_r_fro_error_sq(r, s_star, suffix_sums) -> float:
     if r >= m:
         return 0.0
     return float(suffix_sums[r])
+
 
 def runner(args):
     if args.k is None or args.k == 0:
@@ -155,16 +166,18 @@ def runner(args):
     Y = X @ W_star.T
 
     x_train, y_train = X[:idx_split], Y[:idx_split]
-    x_test,  y_test  = X[idx_split:], Y[idx_split:]
+    x_test, y_test = X[idx_split:], Y[idx_split:]
 
     W_0, eps = make_W0_from_Wstar(W_star, args)
     W_0.requires_grad_(False)
 
     with torch.no_grad():
         print(f"Noise type: {args.noise}, alpha={args.noise_alpha}")
-        print(f"||W*||_F={torch.linalg.norm(W_star, ord='fro').item():.6g}, "
+        print(
+            f"||W*||_F={torch.linalg.norm(W_star, ord='fro').item():.6g}, "
             f"||eps||_F={torch.linalg.norm(eps, ord='fro').item():.6g}, "
-            f"||W*-W0||_F={torch.linalg.norm(W_star - W_0, ord='fro').item():.6g}")
+            f"||W*-W0||_F={torch.linalg.norm(W_star - W_0, ord='fro').item():.6g}"
+        )
 
     # -----------------------------
     # Theory: best rank-r approx error of Δ* = W* - W0
@@ -175,7 +188,7 @@ def runner(args):
         s_star = torch.linalg.svdvals(Delta_star)  # shape (min(d_out,d_in),)
         # Precompute tail Frobenius^2 error for best rank-r approximation:
         # ||Δ* - (Δ*)_r||_F^2 = sum_{i>r} s_i^2
-        s2 = (s_star ** 2).cpu().numpy()
+        s2 = (s_star**2).cpu().numpy()
         # suffix sums of squared singular values
         suffix_sums = np.cumsum(s2[::-1])[::-1]  # suffix_sums[i] = sum_{j>=i} s2[j]
 
@@ -189,7 +202,7 @@ def runner(args):
         if r == 0:
             with torch.no_grad():
                 y_hat_tr = x_train @ W_0.T
-                y_hat_te = x_test  @ W_0.T
+                y_hat_te = x_test @ W_0.T
                 tr_loss = F.mse_loss(y_hat_tr, y_train).item()
                 te_loss = F.mse_loss(y_hat_te, y_test).item()
 
@@ -222,8 +235,8 @@ def runner(args):
         theory_err_sq = best_rank_r_fro_error_sq(r, s_star, suffix_sums)
 
         for step in range(1, num_steps + 1):
-            W_eff = W_0 + (B @ A)                 # (d_out, d_in)
-            y_hat = x_train @ W_eff.T             # (N_train, d_out)
+            W_eff = W_0 + (B @ A)  # (d_out, d_in)
+            y_hat = x_train @ W_eff.T  # (N_train, d_out)
             loss = F.mse_loss(y_hat, y_train)
 
             optim.zero_grad()
@@ -232,7 +245,7 @@ def runner(args):
 
             if step % log_every == 0 or step == 1 or step == num_steps:
                 with torch.no_grad():
-                    DeltaW = (B @ A)
+                    DeltaW = B @ A
                     y_hat_te = x_test @ (W_0 + DeltaW).T
                     test_loss = F.mse_loss(y_hat_te, y_test).item()
                     train_loss = loss.item()
@@ -245,12 +258,14 @@ def runner(args):
 
         # final singular values of learned ΔW
         with torch.no_grad():
-            DeltaW = (B @ A)
+            DeltaW = B @ A
             s_learned = torch.linalg.svdvals(DeltaW).detach().cpu().numpy()
 
         with torch.no_grad():
             DeltaW = B @ A
-            achieved_residual_fro_sq = torch.linalg.norm((W_star - W_0) - DeltaW, ord="fro").item()**2
+            achieved_residual_fro_sq = (
+                torch.linalg.norm((W_star - W_0) - DeltaW, ord="fro").item() ** 2
+            )
 
         rank_dict[r] = {
             "train_loss": logs[-1][1],
@@ -260,37 +275,43 @@ def runner(args):
             "learned_deltaW_singular_values": s_learned,
             "true_delta_star_singular_values": s_star.detach().cpu().numpy(),
             "log": logs,
-            "achieved_residual_fro_sq": achieved_residual_fro_sq
+            "achieved_residual_fro_sq": achieved_residual_fro_sq,
         }
-    
+
     return rank_dict, s_star
+
 
 def plot(rank_dict, s_star, run_name, out_dir):
     sns.set_theme(style="whitegrid", context="talk")
 
     rows = []
     for r, d in rank_dict.items():
-        rows.append({
-            "rank": int(r),
-            "train_mse": float(d["train_loss"]),
-            "test_mse": float(d["test_loss"]),
-            "deltaW_fro": float(d["deltaW_fro"]),
-            "theory_residual_fro_sq": float(d["theory_best_rank_r_fro_err_sq"]),
-            # if you added this (recommended) it will appear; otherwise NaN
-            "achieved_residual_fro_sq": float(d.get("achieved_residual_fro_sq", np.nan)),
-        })
+        rows.append(
+            {
+                "rank": int(r),
+                "train_mse": float(d["train_loss"]),
+                "test_mse": float(d["test_loss"]),
+                "deltaW_fro": float(d["deltaW_fro"]),
+                "theory_residual_fro_sq": float(d["theory_best_rank_r_fro_err_sq"]),
+                # if you added this (recommended) it will appear; otherwise NaN
+                "achieved_residual_fro_sq": float(d.get("achieved_residual_fro_sq", np.nan)),
+            }
+        )
     df = pd.DataFrame(rows).sort_values("rank").reset_index(drop=True)
 
     # Convenient: log2(rank) for nicer x-axis spacing with powers of two
     df["rank_label"] = df["rank"].astype(str)
-    df["log2_rank"] = df["rank"].replace(0, np.nan).apply(lambda x: np.log2(x) if pd.notnull(x) else np.nan)
+    df["log2_rank"] = (
+        df["rank"].replace(0, np.nan).apply(lambda x: np.log2(x) if pd.notnull(x) else np.nan)
+    )
 
     # -----------------------------
     # Plot 1: Train/Test MSE vs rank
     # -----------------------------
     plt.figure(figsize=(10, 6))
-    df_melt = df.melt(id_vars=["rank"], value_vars=["train_mse", "test_mse"],
-                    var_name="split", value_name="mse")
+    df_melt = df.melt(
+        id_vars=["rank"], value_vars=["train_mse", "test_mse"], var_name="split", value_name="mse"
+    )
 
     # Make split labels nicer
     df_melt["split"] = df_melt["split"].map({"train_mse": "Train MSE", "test_mse": "Test MSE"})
@@ -302,11 +323,7 @@ def plot(rank_dict, s_star, run_name, out_dir):
     ax.set_ylabel("MSE (log scale)")
     ax.set_title("MSE vs LoRA rank")
     plt.tight_layout()
-    plt.savefig(
-        out_dir / f"{run_name}__mse_vs_rank.png",
-        dpi=200,
-        bbox_inches="tight"
-    )
+    plt.savefig(out_dir / f"{run_name}__mse_vs_rank.png", dpi=200, bbox_inches="tight")
     plt.close()
 
     # -----------------------------
@@ -315,12 +332,23 @@ def plot(rank_dict, s_star, run_name, out_dir):
     plt.figure(figsize=(10, 6))
 
     # Theory curve
-    ax = sns.lineplot(data=df, x="rank", y="theory_residual_fro_sq", marker="o", label="Theory: best rank-r residual ||Δ*-(Δ*)_r||_F^2")
+    ax = sns.lineplot(
+        data=df,
+        x="rank",
+        y="theory_residual_fro_sq",
+        marker="o",
+        label="Theory: best rank-r residual ||Δ*-(Δ*)_r||_F^2",
+    )
 
     # Achieved residual curve if you stored it
     if df["achieved_residual_fro_sq"].notna().any():
-        sns.lineplot(data=df, x="rank", y="achieved_residual_fro_sq", marker="o",
-                    label="Achieved: ||Δ* - ΔW||_F^2")
+        sns.lineplot(
+            data=df,
+            x="rank",
+            y="achieved_residual_fro_sq",
+            marker="o",
+            label="Achieved: ||Δ* - ΔW||_F^2",
+        )
 
     ax.set_xscale("symlog", linthresh=1)
     ax.set_yscale("log")
@@ -329,9 +357,7 @@ def plot(rank_dict, s_star, run_name, out_dir):
     ax.set_title("Best possible vs achieved weight-space residual")
     plt.tight_layout()
     plt.savefig(
-        out_dir / f"{run_name}__theory_vs_achieved_residual.png",
-        dpi=200,
-        bbox_inches="tight"
+        out_dir / f"{run_name}__theory_vs_achieved_residual.png", dpi=200, bbox_inches="tight"
     )
     plt.close()
 
@@ -342,12 +368,14 @@ def plot(rank_dict, s_star, run_name, out_dir):
     sv_rows = []
 
     # True Δ* singular values (same for all ranks) — include once for overlay
-    true_df = pd.DataFrame({
-        "rank": -1,
-        "i": np.arange(1, len(s_star) + 1),
-        "singular_value": s_star,
-        "type": "True Δ*"
-    })
+    true_df = pd.DataFrame(
+        {
+            "rank": -1,
+            "i": np.arange(1, len(s_star) + 1),
+            "singular_value": s_star,
+            "type": "True Δ*",
+        }
+    )
 
     for r, d in rank_dict.items():
         if r == 0:
@@ -355,14 +383,22 @@ def plot(rank_dict, s_star, run_name, out_dir):
         s_learned = np.array(d["learned_deltaW_singular_values"], dtype=float)
         # sort descending just in case
         s_learned = np.sort(s_learned)[::-1]
-        sv_rows.append(pd.DataFrame({
-            "rank": int(r),
-            "i": np.arange(1, len(s_learned) + 1),
-            "singular_value": s_learned,
-            "type": f"Learned ΔW (r={r})"
-        }))
+        sv_rows.append(
+            pd.DataFrame(
+                {
+                    "rank": int(r),
+                    "i": np.arange(1, len(s_learned) + 1),
+                    "singular_value": s_learned,
+                    "type": f"Learned ΔW (r={r})",
+                }
+            )
+        )
 
-    learned_df = pd.concat(sv_rows, ignore_index=True) if sv_rows else pd.DataFrame(columns=["rank","i","singular_value","type"])
+    learned_df = (
+        pd.concat(sv_rows, ignore_index=True)
+        if sv_rows
+        else pd.DataFrame(columns=["rank", "i", "singular_value", "type"])
+    )
 
     # Plot a "small multiples" style: one plot per rank, overlay true vs learned
     # (Looks good and makes the rank-cap obvious)
@@ -370,10 +406,10 @@ def plot(rank_dict, s_star, run_name, out_dir):
     ncols = 2
     nrows = int(np.ceil(len(unique_ranks) / ncols))
 
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(14, 5*nrows), squeeze=False)
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(14, 5 * nrows), squeeze=False)
     axes = axes.flatten()
 
-    for ax, r in zip(axes, unique_ranks):
+    for ax, r in zip(axes, unique_ranks, strict=False):
         d = rank_dict[r]
         s_learned = np.sort(np.array(d["learned_deltaW_singular_values"], dtype=float))[::-1]
 
@@ -381,7 +417,13 @@ def plot(rank_dict, s_star, run_name, out_dir):
         ax.plot(np.arange(1, len(s_star) + 1), s_star, marker="o", linestyle="-", label="True Δ*")
 
         # Plot learned ΔW
-        ax.plot(np.arange(1, len(s_learned) + 1), s_learned, marker="o", linestyle="-", label=f"Learned ΔW (r={r})")
+        ax.plot(
+            np.arange(1, len(s_learned) + 1),
+            s_learned,
+            marker="o",
+            linestyle="-",
+            label=f"Learned ΔW (r={r})",
+        )
 
         ax.set_yscale("log")
         ax.set_xlabel("Singular value index i")
@@ -390,14 +432,12 @@ def plot(rank_dict, s_star, run_name, out_dir):
         ax.legend()
 
     # Hide unused axes
-    for ax in axes[len(unique_ranks):]:
+    for ax in axes[len(unique_ranks) :]:
         ax.axis("off")
 
     plt.tight_layout()
     plt.savefig(
-        out_dir / f"{run_name}__singular_values_true_vs_learned.png",
-        dpi=200,
-        bbox_inches="tight"
+        out_dir / f"{run_name}__singular_values_true_vs_learned.png", dpi=200, bbox_inches="tight"
     )
     plt.close()
 
@@ -408,28 +448,38 @@ def plot(rank_dict, s_star, run_name, out_dir):
     for r, d in rank_dict.items():
         for entry in d["log"]:
             step, train_loss, test_loss, deltaW_fro = entry
-            lc_rows.append({"rank": int(r), "step": int(step), "train_mse": float(train_loss), "test_mse": float(test_loss), "deltaW_fro": float(deltaW_fro)})
+            lc_rows.append(
+                {
+                    "rank": int(r),
+                    "step": int(step),
+                    "train_mse": float(train_loss),
+                    "test_mse": float(test_loss),
+                    "deltaW_fro": float(deltaW_fro),
+                }
+            )
 
     lc = pd.DataFrame(lc_rows)
 
     # Melt for seaborn
-    lc_melt = lc.melt(id_vars=["rank", "step"], value_vars=["train_mse", "test_mse"],
-                    var_name="split", value_name="mse")
+    lc_melt = lc.melt(
+        id_vars=["rank", "step"],
+        value_vars=["train_mse", "test_mse"],
+        var_name="split",
+        value_name="mse",
+    )
     lc_melt["split"] = lc_melt["split"].map({"train_mse": "Train MSE", "test_mse": "Test MSE"})
 
     plt.figure(figsize=(12, 7))
-    ax = sns.lineplot(data=lc_melt[lc_melt["rank"] != 0], x="step", y="mse", hue="rank", style="split")
+    ax = sns.lineplot(
+        data=lc_melt[lc_melt["rank"] != 0], x="step", y="mse", hue="rank", style="split"
+    )
     ax.set_yscale("log")
     ax.set_xlabel("Training step")
     ax.set_ylabel("MSE (log scale)")
     ax.set_title("Learning curves by rank (train vs test)")
     plt.legend(title="Rank / Split", bbox_to_anchor=(1.02, 1), loc="upper left")
     plt.tight_layout()
-    plt.savefig(
-        out_dir / f"{run_name}__learning_curves.png",
-        dpi=200,
-        bbox_inches="tight"
-    )
+    plt.savefig(out_dir / f"{run_name}__learning_curves.png", dpi=200, bbox_inches="tight")
     plt.close()
 
 
@@ -437,23 +487,43 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--k", type=int, default=None)
     parser.add_argument("--out_dir", type=str, default="/workspace/ml-stuff/LoRA/plots")
-    parser.add_argument("--noise", type=str, default="none",
-                    choices=["none", "gaussian", "low_rank", "spectral"],
-                    help="Noise model for epsilon in W0 = W* + epsilon")
+    parser.add_argument(
+        "--noise",
+        type=str,
+        default="none",
+        choices=["none", "gaussian", "low_rank", "spectral"],
+        help="Noise model for epsilon in W0 = W* + epsilon",
+    )
 
-    parser.add_argument("--noise_alpha", type=float, default=0.0,
-                        help="Target relative Frobenius norm: ||eps||_F ~= alpha * ||W*||_F. "
-                            "If 0, no noise is added.")
+    parser.add_argument(
+        "--noise_alpha",
+        type=float,
+        default=0.0,
+        help="Target relative Frobenius norm: ||eps||_F ~= alpha * ||W*||_F. "
+        "If 0, no noise is added.",
+    )
 
     # low-rank noise
-    parser.add_argument("--noise_k", type=int, default=8,
-                        help="Rank for low_rank noise epsilon = U V (only used if --noise low_rank).")
+    parser.add_argument(
+        "--noise_k",
+        type=int,
+        default=8,
+        help="Rank for low_rank noise epsilon = U V (only used if --noise low_rank).",
+    )
 
     # spectral noise
-    parser.add_argument("--noise_p", type=float, default=1.5,
-                        help="Power-law exponent for spectral singular values sigma_i ~ i^{-p} (only used if --noise spectral).")
-    parser.add_argument("--noise_sigma0", type=float, default=1.0,
-                        help="Base singular value scale before Frobenius rescale (only used if --noise spectral).")
+    parser.add_argument(
+        "--noise_p",
+        type=float,
+        default=1.5,
+        help="Power-law exponent for spectral singular values sigma_i ~ i^{-p} (only used if --noise spectral).",
+    )
+    parser.add_argument(
+        "--noise_sigma0",
+        type=float,
+        default=1.0,
+        help="Base singular value scale before Frobenius rescale (only used if --noise spectral).",
+    )
 
     # reproducibility
     parser.add_argument("--seed", type=int, default=0)
@@ -472,7 +542,6 @@ def main():
 
     rank_dict, s_star = runner(args)
     plot(rank_dict, s_star, run_name, out_dir)
-
 
 
 if __name__ == "__main__":

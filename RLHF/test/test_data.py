@@ -1,19 +1,21 @@
 import sys
-import torch
 from pathlib import Path
+
+import torch
 
 # Add parent directory to path to import modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from data.tokenize import tokenize_preference_example
-from data.debug import debug_print_tokenized_item
-from data.collate import collate_preference_batch
-from engine import load_tokenizer, completion_logprobs, load_model
-from typing import Sequence, Dict, Any
+from collections.abc import Sequence
+from typing import Any
 
-def test_row_extraction_invariance(
-    model, tokenizer, batch, *, which="chosen", atol=1e-4
-):
+from data.collate import collate_preference_batch
+from data.debug import debug_print_tokenized_item
+from data.tokenize import tokenize_preference_example
+from engine import completion_logprobs, load_model, load_tokenizer
+
+
+def test_row_extraction_invariance(model, tokenizer, batch, *, which="chosen", atol=1e-4):
     device = next(model.parameters()).device
     model.eval()
 
@@ -28,9 +30,9 @@ def test_row_extraction_invariance(
     # score each *padded row* individually (same exact tensor values)
     sum_rows = []
     for i in range(input_ids.size(0)):
-        ids_i = input_ids[i:i+1]
-        attn_i = attn[i:i+1]
-        pl_i = prompt_lens[i:i+1]
+        ids_i = input_ids[i : i + 1]
+        attn_i = attn[i : i + 1]
+        pl_i = prompt_lens[i : i + 1]
         s_i, _, _, _ = completion_logprobs(model, ids_i, attn_i, pl_i)
         sum_rows.append(s_i[0].detach().cpu())
     sum_rows = torch.stack(sum_rows, dim=0)
@@ -40,11 +42,12 @@ def test_row_extraction_invariance(
     print("rows :", sum_rows.tolist())
     torch.testing.assert_close(sum_batch, sum_rows, atol=atol, rtol=0.0)
 
+
 def test_padding_invariance_end_to_end(
     model,
     tokenizer,
     *,
-    examples: Sequence[Dict[str, Any]],
+    examples: Sequence[dict[str, Any]],
     max_len: int = 256,
     atol: float = 1e-4,
     rtol: float = 0.0,
@@ -107,8 +110,8 @@ def test_padding_invariance_end_to_end(
     with torch.no_grad():
         for i, item in enumerate(tokenized):
             # chosen
-            ci = item.chosen_input_ids_1d.to(device).unsqueeze(0)           # [1, T_i]
-            ca = item.chosen_attention_mask_1d.to(device).unsqueeze(0)      # [1, T_i]
+            ci = item.chosen_input_ids_1d.to(device).unsqueeze(0)  # [1, T_i]
+            ca = item.chosen_attention_mask_1d.to(device).unsqueeze(0)  # [1, T_i]
             pl = torch.tensor([item.prompt_len], device=device, dtype=torch.long)
 
             slp_c, _, _, _ = completion_logprobs(model, ci, ca, pl)
@@ -157,6 +160,7 @@ def test_padding_invariance_end_to_end(
 
     return True
 
+
 if __name__ == "__main__":
     tokenizer = load_tokenizer("Qwen/Qwen2.5-0.5B-Instruct")
     device = torch.device("cuda")
@@ -192,4 +196,6 @@ if __name__ == "__main__":
         },
     ]
 
-    test_padding_invariance_end_to_end(model, tokenizer, examples=examples, max_len=256, verbose=True)
+    test_padding_invariance_end_to_end(
+        model, tokenizer, examples=examples, max_len=256, verbose=True
+    )

@@ -1,6 +1,8 @@
-import torch
-from typing import Dict, Any, List
 from dataclasses import dataclass
+from typing import Any
+
+import torch
+
 from .formats import build_prompt_from_messages
 
 
@@ -11,7 +13,7 @@ def tokenize_prompt_plus_completion(
     *,
     max_len: int,
     truncation_side: str = "left",
-) -> Dict[str, torch.Tensor]:
+) -> dict[str, torch.Tensor]:
     """Tokenize a completion and concatenate with prompt token IDs.
 
     Tokenizes the completion text, concatenates it with the given prompt tokens,
@@ -60,6 +62,7 @@ def tokenize_prompt_plus_completion(
         "completion_len": completion_len,
     }
 
+
 @dataclass
 class TokenizedPreferenceExample:
     prompt_text: str
@@ -78,7 +81,7 @@ class TokenizedPreferenceExample:
 
 def tokenize_preference_example(
     tokenizer,
-    example: Dict[str, Any],
+    example: dict[str, Any],
     *,
     max_len: int,
 ) -> TokenizedPreferenceExample:
@@ -107,10 +110,10 @@ def tokenize_preference_example(
         - Each completion keeps its last min(len(completion), max_len) tokens.
         - prompt_len is identical for both chosen and rejected by design.
     """
-    messages: List[Dict[str, str]] = example["messages"]
+    messages: list[dict[str, str]] = example["messages"]
     chosen_text: str = example["chosen"]
     rejected_text: str = example["rejected"]
-    
+
     prompt_text, prompt_ids_1d, _prompt_len_full = build_prompt_from_messages(tokenizer, messages)
     prompt_ids_1d = prompt_ids_1d.to(dtype=torch.long)  # keep on CPU
     P = int(prompt_ids_1d.numel())
@@ -128,7 +131,9 @@ def tokenize_preference_example(
     chosen_kept_c = min(Cc, max_len)
     rejected_kept_c = min(Cr, max_len)
     chosen_comp_kept = chosen_comp_1d[-chosen_kept_c:] if chosen_kept_c > 0 else chosen_comp_1d[:0]
-    rejected_comp_kept = rejected_comp_1d[-rejected_kept_c:] if rejected_kept_c > 0 else rejected_comp_1d[:0]
+    rejected_comp_kept = (
+        rejected_comp_1d[-rejected_kept_c:] if rejected_kept_c > 0 else rejected_comp_1d[:0]
+    )
 
     # Shared prompt budget based on longer kept completion
     max_kept_completion = max(chosen_kept_c, rejected_kept_c)

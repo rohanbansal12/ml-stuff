@@ -1,21 +1,21 @@
-import pytest
-import torch
 import sys
 from pathlib import Path
+
+import pytest
+import torch
 
 # Add parent directory to path to import engine
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from engine import (
-    env_info,
-    load_tokenizer,
-    load_model,
-    generate_one,
-    GenOutput,
-    completion_logprobs,
-    RLHFEngine,
-    MODEL_NAME,
     DEVICE,
+    MODEL_NAME,
+    GenOutput,
+    RLHFEngine,
+    completion_logprobs,
+    generate_one,
+    load_model,
+    load_tokenizer,
 )
 
 
@@ -151,16 +151,12 @@ class TestGeneration:
 
     def test_generate_one_returns_genoutput(self, model, tokenizer, sample_messages):
         """Test that generate_one returns a GenOutput object."""
-        result = generate_one(
-            model, tokenizer, sample_messages, max_new_tokens=10, do_sample=False
-        )
+        result = generate_one(model, tokenizer, sample_messages, max_new_tokens=10, do_sample=False)
         assert isinstance(result, GenOutput)
 
     def test_genoutput_fields(self, model, tokenizer, sample_messages):
         """Test that GenOutput has all required fields."""
-        result = generate_one(
-            model, tokenizer, sample_messages, max_new_tokens=10, do_sample=False
-        )
+        result = generate_one(model, tokenizer, sample_messages, max_new_tokens=10, do_sample=False)
 
         assert hasattr(result, "prompt_text")
         assert hasattr(result, "prompt_len")
@@ -214,9 +210,7 @@ class TestGeneration:
 
     def test_prompt_len_correct(self, model, tokenizer, sample_messages):
         """Test that prompt_len matches the actual prompt length."""
-        result = generate_one(
-            model, tokenizer, sample_messages, max_new_tokens=10, do_sample=False
-        )
+        result = generate_one(model, tokenizer, sample_messages, max_new_tokens=10, do_sample=False)
 
         # Verify that output_ids = prompt + completion
         assert result.output_ids.numel() == result.prompt_len + result.completion_ids.numel()
@@ -328,11 +322,11 @@ class TestRLHFEngine:
         rejected_text = " Goodbye!"
 
         chosen_ids = tokenizer.encode(chosen_text, add_special_tokens=False, return_tensors="pt")[0]
-        rejected_ids = tokenizer.encode(rejected_text, add_special_tokens=False, return_tensors="pt")[0]
+        rejected_ids = tokenizer.encode(
+            rejected_text, add_special_tokens=False, return_tensors="pt"
+        )[0]
 
-        logp_chosen, logp_rejected = engine.score_pair(
-            sample_messages, chosen_ids, rejected_ids
-        )
+        logp_chosen, logp_rejected = engine.score_pair(sample_messages, chosen_ids, rejected_ids)
 
         assert isinstance(logp_chosen, float)
         assert isinstance(logp_rejected, float)
@@ -360,14 +354,10 @@ class TestEndToEnd:
     def test_full_generation_and_scoring_pipeline(self, engine, sample_messages):
         """Test complete pipeline: generate then score."""
         # Generate a completion
-        gen_result = engine.generate(
-            sample_messages, max_new_tokens=15, do_sample=False
-        )
+        gen_result = engine.generate(sample_messages, max_new_tokens=15, do_sample=False)
 
         # Score the generated completion
-        logprob = engine.logprob_of_completion(
-            sample_messages, gen_result.completion_ids
-        )
+        logprob = engine.logprob_of_completion(sample_messages, gen_result.completion_ids)
 
         # Should get a finite negative log probability
         assert isinstance(logprob, float)
@@ -376,16 +366,10 @@ class TestEndToEnd:
 
     def test_score_consistency(self, engine, sample_messages):
         """Test that scoring the same completion twice gives same result."""
-        gen_result = engine.generate(
-            sample_messages, max_new_tokens=10, do_sample=False
-        )
+        gen_result = engine.generate(sample_messages, max_new_tokens=10, do_sample=False)
 
-        score1 = engine.logprob_of_completion(
-            sample_messages, gen_result.completion_ids
-        )
-        score2 = engine.logprob_of_completion(
-            sample_messages, gen_result.completion_ids
-        )
+        score1 = engine.logprob_of_completion(sample_messages, gen_result.completion_ids)
+        score2 = engine.logprob_of_completion(sample_messages, gen_result.completion_ids)
 
         assert abs(score1 - score2) < 1e-5
 

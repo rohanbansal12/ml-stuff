@@ -1,16 +1,20 @@
-import torch
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Any
+
+import torch
+
 
 @dataclass
 class PreferenceExample:
-    messages: List[Dict[str, str]]
+    messages: list[dict[str, str]]
     chosen: str
     rejected: str
-    meta: Optional[Dict[str, Any]] = None
+    meta: dict[str, Any] | None = None
 
 
-def build_prompt_from_messages(tokenizer, messages: List[Dict[str, str]]) -> Tuple[str, torch.Tensor, int]:
+def build_prompt_from_messages(
+    tokenizer, messages: list[dict[str, str]]
+) -> tuple[str, torch.Tensor, int]:
     """Build a chat-template prompt string and tokenize it.
 
     Applies the tokenizer's chat template to format the conversation messages

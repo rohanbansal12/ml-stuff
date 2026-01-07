@@ -1,17 +1,16 @@
 # train/dpo.py
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
-from typing import Dict, Optional
+from pathlib import Path
 
 import torch
-
-import sys
-from pathlib import Path
 
 # Add parent directory to path to import modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from engine import completion_logprobs
+
 
 @dataclass
 class IPOBatchMetrics:
@@ -33,24 +32,25 @@ class IPOBatchMetrics:
         rejected_token_count: Number of tokens in rejected completions, shape [B].
         grad_norm: Gradient norm before clipping (set by ipo_step).
     """
-    loss: torch.Tensor                  # scalar
-    margin: torch.Tensor                # [B] = (Δ_policy - Δ_ref)
-    target: float                       # scalar = 1 / beta
-    error: torch.Tensor                 # [B] = margin - target
+
+    loss: torch.Tensor  # scalar
+    margin: torch.Tensor  # [B] = (Δ_policy - Δ_ref)
+    target: float  # scalar = 1 / beta
+    error: torch.Tensor  # [B] = margin - target
 
     # diagnostic only (not used for training)
-    acc: torch.Tensor                   # scalar = mean(margin > 0)
+    acc: torch.Tensor  # scalar = mean(margin > 0)
 
     # logprobs (sum or mean depending on config)
-    policy_logp_chosen: torch.Tensor    # [B]
+    policy_logp_chosen: torch.Tensor  # [B]
     policy_logp_rejected: torch.Tensor  # [B]
-    ref_logp_chosen: torch.Tensor       # [B]
-    ref_logp_rejected: torch.Tensor     # [B]
+    ref_logp_chosen: torch.Tensor  # [B]
+    ref_logp_rejected: torch.Tensor  # [B]
 
     # optional diagnostics
-    chosen_token_count: Optional[torch.Tensor] = None   # [B]
-    rejected_token_count: Optional[torch.Tensor] = None # [B]
-    grad_norm: Optional[torch.Tensor] = None  # scalar, gradient norm before clipping
+    chosen_token_count: torch.Tensor | None = None  # [B]
+    rejected_token_count: torch.Tensor | None = None  # [B]
+    grad_norm: torch.Tensor | None = None  # scalar, gradient norm before clipping
 
     def pretty_print(self, prefix: str = "") -> None:
         """Print IPO metrics in a compact, terminal-friendly format.
@@ -67,6 +67,7 @@ class IPOBatchMetrics:
         Args:
             prefix: String prefix for the output line.
         """
+
         # Helper to extract scalar values
         def val(x: torch.Tensor) -> float:
             return x.detach().item() if x.numel() == 1 else x.detach().mean().item()
@@ -93,7 +94,7 @@ class IPOBatchMetrics:
 def ipo_loss_batch(
     policy_model: torch.nn.Module,
     ref_model: torch.nn.Module,
-    batch: Dict[str, torch.Tensor],
+    batch: dict[str, torch.Tensor],
     beta: float,
     use_mean_logp: bool = False,
 ) -> IPOBatchMetrics:
@@ -133,14 +134,10 @@ def ipo_loss_batch(
     assert "chosen_input_ids" in batch, "Missing 'chosen_input_ids' in batch"
     assert "chosen_attention_mask" in batch, "Missing 'chosen_attention_mask' in batch"
     assert "rejected_input_ids" in batch, "Missing 'rejected_input_ids' in batch"
-    assert "rejected_attention_mask" in batch, (
-        "Missing 'rejected_attention_mask' in batch"
-    )
+    assert "rejected_attention_mask" in batch, "Missing 'rejected_attention_mask' in batch"
     assert "prompt_lens" in batch, "Missing 'prompt_lens' in batch"
 
-    assert batch["prompt_lens"].dtype == torch.long, (
-        "'prompt_lens' should be torch.long"
-    )
+    assert batch["prompt_lens"].dtype == torch.long, "'prompt_lens' should be torch.long"
     assert beta > 0, "Beta must be >0"
 
     chosen_input_ids = batch["chosen_input_ids"]
@@ -203,16 +200,17 @@ def ipo_loss_batch(
         ref_logp_chosen=logp_ref_chosen,
         ref_logp_rejected=logp_ref_rejected,
         chosen_token_count=chosen_tok_count,
-        rejected_token_count=rejected_tok_count
+        rejected_token_count=rejected_tok_count,
     )
+
 
 def ipo_step(
     policy_model: torch.nn.Module,
     ref_model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    batch: Dict[str, torch.Tensor],
+    batch: dict[str, torch.Tensor],
     beta: float,
-    grad_clip_norm: Optional[float] = None,
+    grad_clip_norm: float | None = None,
     use_mean_logp: bool = False,
 ) -> IPOBatchMetrics:
     """Perform a single IPO training step with gradient update.
@@ -247,7 +245,9 @@ def ipo_step(
     metrics.loss.backward()
 
     # Compute gradient norm before clipping
-    total_norm = torch.nn.utils.clip_grad_norm_(policy_model.parameters(), grad_clip_norm or float("inf"))
+    total_norm = torch.nn.utils.clip_grad_norm_(
+        policy_model.parameters(), grad_clip_norm or float("inf")
+    )
     metrics.grad_norm = total_norm
 
     optimizer.step()

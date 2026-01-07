@@ -1,20 +1,22 @@
+import argparse
+import os
+import random
+import shutil
+
+import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from datasets import load_dataset
+from peft import LoraConfig, TaskType, get_peft_model
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from transformers import (
+    AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
     get_linear_schedule_with_warmup,
-    AutoModelForSequenceClassification,
 )
-import argparse
-import random
-import numpy as np
-from peft import LoraConfig, get_peft_model, TaskType
-from torch.utils.tensorboard import SummaryWriter
-import os
-import shutil
+
 
 def make_sst2_dataloaders(
     model_name: str = "prajjwal1/bert-tiny",
@@ -38,9 +40,7 @@ def make_sst2_dataloaders(
         enc["labels"] = batch["label"]
         return enc
 
-    tokenized = ds.map(
-        preprocess, batched=True, remove_columns=ds["train"].column_names
-    )
+    tokenized = ds.map(preprocess, batched=True, remove_columns=ds["train"].column_names)
 
     # 4) Data collator handles dynamic padding per batch
     collator = DataCollatorWithPadding(tokenizer=tok, return_tensors="pt")
@@ -96,7 +96,7 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
 
     run_name = f"bert_{args.run_type}_lr{args.lr}"
-    if args.run_type == 'lora':
+    if args.run_type == "lora":
         run_name += f"_r={args.lora_r}"
     tb_logdir = os.path.join(args.log_dir, run_name)
     if tb_logdir.exists():
@@ -117,9 +117,9 @@ def main():
     warmup_steps = int(0.1 * total_steps)  # 10% warmup
 
     # base sequence classification model
-    model = AutoModelForSequenceClassification.from_pretrained(
-        args.model_name, num_labels=2
-    ).to(device)
+    model = AutoModelForSequenceClassification.from_pretrained(args.model_name, num_labels=2).to(
+        device
+    )
 
     # turn off grad for parameters based on run type
     if args.run_type == "head":
@@ -151,9 +151,7 @@ def main():
     writer.add_scalar("model/total_params", total, 0)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(
-        trainable_params, lr=args.lr, weight_decay=.01
-    )
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.01)
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
     )
@@ -175,10 +173,7 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                trainable_params,
-                max_norm=1.0
-            )
+            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
             optimizer.step()
             scheduler.step()
 

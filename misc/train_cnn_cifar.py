@@ -4,7 +4,6 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-
 # -----------------------
 # 1. Config
 # -----------------------
@@ -19,23 +18,21 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # -----------------------
 # 2. Data (CIFAR-10)
 # -----------------------
-transform_train = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.4914, 0.4822, 0.4465],
-        std=[0.2470, 0.2435, 0.2616]
-    ),
-])
+transform_train = transforms.Compose(
+    [
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]),
+    ]
+)
 
-transform_test = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.4914, 0.4822, 0.4465],
-        std=[0.2470, 0.2435, 0.2616]
-    ),
-])
+transform_test = transforms.Compose(
+    [
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]),
+    ]
+)
 
 train_dataset = datasets.CIFAR10(
     root="./data",
@@ -72,33 +69,32 @@ test_loader = DataLoader(
 class MyBasicCNN(nn.Module):
     def __init__(self):
         super().__init__()
-        
+
         ## dims 3x32x32 -> 128x8x8
-        self.features = nn.Sequential(*[
-            nn.Conv2d(3, 32, kernel_size=3, padding=1, bias=False), ## dims 3x32x32 -> 32x32x32
-            nn.BatchNorm2d(32), 
-            nn.ReLU(inplace=True),
-
-            nn.Conv2d(32, 64, kernel_size=3, padding=1, bias=False), ## dims 32x32x32 -> 64x32x32
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True), 
-
-            nn.MaxPool2d(kernel_size=2, stride=2), ## dims 64x32x32 -> 64x16x16
-
-            nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=False), ## dims 64x16x16 -> 128x16x16
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-
-            nn.MaxPool2d(kernel_size=2, stride=2), ## dims 128x16x16 -> 128x8x8
-        ])
+        self.features = nn.Sequential(
+            *[
+                nn.Conv2d(3, 32, kernel_size=3, padding=1, bias=False),  ## dims 3x32x32 -> 32x32x32
+                nn.BatchNorm2d(32),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(
+                    32, 64, kernel_size=3, padding=1, bias=False
+                ),  ## dims 32x32x32 -> 64x32x32
+                nn.BatchNorm2d(64),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(kernel_size=2, stride=2),  ## dims 64x32x32 -> 64x16x16
+                nn.Conv2d(
+                    64, 128, kernel_size=3, padding=1, bias=False
+                ),  ## dims 64x16x16 -> 128x16x16
+                nn.BatchNorm2d(128),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(kernel_size=2, stride=2),  ## dims 128x16x16 -> 128x8x8
+            ]
+        )
 
         ## dims 128x8x8 -> 10
-        self.classifier = nn.Sequential(*[
-            nn.Flatten(),
-            nn.Linear(128 * 8 * 8, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, 10)
-        ])
+        self.classifier = nn.Sequential(
+            *[nn.Flatten(), nn.Linear(128 * 8 * 8, 128), nn.ReLU(inplace=True), nn.Linear(128, 10)]
+        )
 
     def forward(self, x):
         x = self.features(x)
@@ -195,6 +191,7 @@ def main():
             print(f"🔹 Saved new best model with acc {best_acc:.4f}")
 
     print("Training done. Best test acc:", best_acc)
+
 
 if __name__ == "__main__":
     main()

@@ -1,13 +1,12 @@
 import torch
 import torch.nn.functional as F
-from typing import Optional, Tuple, Union, Dict
 
 
 def _reduce_minmax(
     x: torch.Tensor,
     per_channel: bool,
-    axis: Optional[int],
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    axis: int | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Returns xmin, xmax. If per_channel=True, reduces across all dims except `axis`.
     Shapes:
@@ -31,9 +30,9 @@ def _reduce_percentile(
     x: torch.Tensor,
     p: float,
     per_channel: bool,
-    axis: Optional[int],
+    axis: int | None,
     symmetric: bool,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Percentile-based range. For asymmetric: [q_low, q_high] = [1-p, p].
     For symmetric: use max(|q|) based on percentile of abs(x).
@@ -64,7 +63,7 @@ def _reduce_percentile(
         return -a, a
 
     lo = torch.quantile(y, 1.0 - p, dim=1).to(x.dtype)  # [C]
-    hi = torch.quantile(y, p, dim=1).to(x.dtype)        # [C]
+    hi = torch.quantile(y, p, dim=1).to(x.dtype)  # [C]
     return lo, hi
 
 
@@ -72,8 +71,8 @@ def _maybe_clip_range(
     x: torch.Tensor,
     xmin: torch.Tensor,
     xmax: torch.Tensor,
-    clip: Optional[Dict[str, Union[str, float]]] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    clip: dict[str, str | float] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     clip can be:
       - None
@@ -101,7 +100,7 @@ def _broadcast_to_axis_param(
     param: torch.Tensor,
     x: torch.Tensor,
     per_channel: bool,
-    axis: Optional[int],
+    axis: int | None,
 ) -> torch.Tensor:
     """
     Reshape param to broadcast over x. If per_channel, param is shape [C] and is
@@ -123,12 +122,12 @@ def calc_qparams_affine(
     x: torch.Tensor,
     bits: int = 8,
     per_channel: bool = False,
-    axis: Optional[int] = None,
-    qmin: Optional[int] = None,
-    qmax: Optional[int] = None,
-    clip: Optional[Dict[str, Union[str, float]]] = None,
+    axis: int | None = None,
+    qmin: int | None = None,
+    qmax: int | None = None,
+    clip: dict[str, str | float] | None = None,
     eps: float = 1e-8,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Affine (asymmetric) quantization params for signed integers by default.
       q = round(x / scale) + zero_point
@@ -182,11 +181,11 @@ def calc_qparams_symmetric(
     x: torch.Tensor,
     bits: int = 8,
     per_channel: bool = False,
-    axis: Optional[int] = None,
-    qmax: Optional[int] = None,
-    clip: Optional[Dict[str, Union[str, float]]] = None,
+    axis: int | None = None,
+    qmax: int | None = None,
+    clip: dict[str, str | float] | None = None,
     eps: float = 1e-8,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Symmetric quantization params (zero_point = 0).
     Typical signed symmetric int8 uses range [-127, 127] (not -128) to keep symmetry.
@@ -241,7 +240,7 @@ def quantize_affine(
     qmin: int,
     qmax: int,
     dtype=torch.int8,
-) -> Tuple[torch.Tensor, float]:
+) -> tuple[torch.Tensor, float]:
     q = torch.round(x / scale) + zero_point.to(x.dtype)
     # count how many will clip (before clamp)
     clipped = (q < qmin) | (q > qmax)
@@ -249,12 +248,13 @@ def quantize_affine(
     q = torch.clamp(q, qmin, qmax)
     return q.to(dtype), clipped_frac
 
+
 def quantize_symmetric(
     x: torch.Tensor,
     scale: torch.Tensor,
     qmax: int,
     dtype: torch.dtype = torch.int8,
-) -> Tuple[torch.Tensor, float]:
+) -> tuple[torch.Tensor, float]:
     qmin = -qmax
     q = torch.round(x / scale)
 
@@ -263,6 +263,7 @@ def quantize_symmetric(
 
     q = torch.clamp(q, qmin, qmax)
     return q.to(dtype), clipped_frac
+
 
 def dequantize_affine(
     q: torch.Tensor, scale: torch.Tensor, zero_point: torch.Tensor
@@ -276,21 +277,20 @@ def quant_dequant_affine(
     x: torch.Tensor,
     bits: int = 8,
     per_channel: bool = False,
-    axis: Optional[int] = None,
-    qmin: Optional[int] = None,
-    qmax: Optional[int] = None,
-    clip: Optional[Dict[str, Union[str, float]]] = None,
+    axis: int | None = None,
+    qmin: int | None = None,
+    qmax: int | None = None,
+    clip: dict[str, str | float] | None = None,
     eps: float = 1e-8,
     dtype: torch.dtype = torch.int8,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
     # defaults consistent with calc_qparams_affine
     if qmin is None or qmax is None:
         qmin = -(2 ** (bits - 1))
         qmax = (2 ** (bits - 1)) - 1
 
     scale, zp = calc_qparams_affine(
-        x, bits=bits, per_channel=per_channel, axis=axis,
-        qmin=qmin, qmax=qmax, clip=clip, eps=eps
+        x, bits=bits, per_channel=per_channel, axis=axis, qmin=qmin, qmax=qmax, clip=clip, eps=eps
     )
     q, clipped_frac = quantize_affine(x, scale, zp, qmin=qmin, qmax=qmax, dtype=dtype)
     x_hat = dequantize_affine(q, scale, zp)
@@ -301,27 +301,27 @@ def quant_dequant_symmetric(
     x: torch.Tensor,
     bits: int = 8,
     per_channel: bool = False,
-    axis: Optional[int] = None,
-    qmax: Optional[int] = None,
-    clip: Optional[Dict[str, Union[str, float]]] = None,
+    axis: int | None = None,
+    qmax: int | None = None,
+    clip: dict[str, str | float] | None = None,
     eps: float = 1e-8,
     dtype: torch.dtype = torch.int8,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
     if qmax is None:
         # symmetric signed uses [-qmax, qmax], commonly qmax=127 for int8
         qmax = (2 ** (bits - 1)) - 1
     qmin = -qmax
 
     scale, zp = calc_qparams_symmetric(
-        x, bits=bits, per_channel=per_channel, axis=axis,
-        qmax=qmax, clip=clip, eps=eps
+        x, bits=bits, per_channel=per_channel, axis=axis, qmax=qmax, clip=clip, eps=eps
     )
     # zp is zero in symmetric, but reuse affine code
     q, clipped_frac = quantize_affine(x, scale, zp, qmin=qmin, qmax=qmax, dtype=dtype)
     x_hat = dequantize_affine(q, scale, zp)
     return x_hat, q, scale, zp, clipped_frac
 
-def quant_error_report(x: torch.Tensor, x_hat: torch.Tensor) -> Dict[str, float]:
+
+def quant_error_report(x: torch.Tensor, x_hat: torch.Tensor) -> dict[str, float]:
     diff = x_hat - x
     cos = F.cosine_similarity(x.flatten(), x_hat.flatten(), dim=0).item()
     return {

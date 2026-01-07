@@ -1,6 +1,7 @@
+from typing import Any
+
 import torch
 import torch.nn.functional as F
-from typing import Any, Dict, List, Optional
 
 
 def debug_print_tokenized_item(
@@ -125,19 +126,19 @@ def debug_score_example(
     tokenizer,
     *,
     # Option A: full sequence directly
-    input_ids_1d: Optional[torch.Tensor] = None,  # [T]
-    attention_mask_1d: Optional[torch.Tensor] = None,  # [T]
-    prompt_len: Optional[int] = None,
+    input_ids_1d: torch.Tensor | None = None,  # [T]
+    attention_mask_1d: torch.Tensor | None = None,  # [T]
+    prompt_len: int | None = None,
     # Option B: messages + completion
-    messages: Optional[List[Dict[str, str]]] = None,
-    completion_text: Optional[str] = None,
-    completion_ids_1d: Optional[torch.Tensor] = None,
+    messages: list[dict[str, str]] | None = None,
+    completion_text: str | None = None,
+    completion_ids_1d: torch.Tensor | None = None,
     # Controls
     max_print_tokens: int = 80,
     skip_special_tokens: bool = False,
     include_prompt_tokens: bool = False,
     show_topk: int = 0,  # set >0 to show top-k alternatives per position (heavier)
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Debug and decompose completion log probabilities token-by-token.
 
     Performs a forward pass through the model and computes per-token log probabilities
@@ -200,20 +201,14 @@ def debug_score_example(
     # TODO-turned-into-code: validate input mode
     # -----------------------------
     mode_full = (
-        (input_ids_1d is not None)
-        or (attention_mask_1d is not None)
-        or (prompt_len is not None)
+        (input_ids_1d is not None) or (attention_mask_1d is not None) or (prompt_len is not None)
     )
     mode_msgs = (
-        (messages is not None)
-        or (completion_text is not None)
-        or (completion_ids_1d is not None)
+        (messages is not None) or (completion_text is not None) or (completion_ids_1d is not None)
     )
 
     if mode_full and mode_msgs:
-        raise ValueError(
-            "Provide either full-seq inputs OR messages+completion, not both."
-        )
+        raise ValueError("Provide either full-seq inputs OR messages+completion, not both.")
     if not mode_full and not mode_msgs:
         raise ValueError(
             "Provide either (input_ids_1d, attention_mask_1d, prompt_len) OR (messages, completion_*)."
@@ -265,16 +260,14 @@ def debug_score_example(
     # -----------------------------
     # Full sequence mode: sanitize inputs
     # -----------------------------
-    assert input_ids_1d is not None and prompt_len is not None, (
-        "Full-seq mode requires input_ids_1d and prompt_len."
-    )
+    assert (
+        input_ids_1d is not None and prompt_len is not None
+    ), "Full-seq mode requires input_ids_1d and prompt_len."
     if attention_mask_1d is None:
         attention_mask_1d = torch.ones_like(input_ids_1d, dtype=torch.long)
 
     if input_ids_1d.dim() != 1:
-        raise ValueError(
-            f"input_ids_1d must be 1D, got shape {tuple(input_ids_1d.shape)}"
-        )
+        raise ValueError(f"input_ids_1d must be 1D, got shape {tuple(input_ids_1d.shape)}")
     if attention_mask_1d.dim() != 1:
         raise ValueError(
             f"attention_mask_1d must be 1D, got shape {tuple(attention_mask_1d.shape)}"
@@ -308,9 +301,7 @@ def debug_score_example(
     attn_shifted = attention_mask_1d[1:].bool()  # [T-1]
 
     logp_all = F.log_softmax(logits_shifted, dim=-1)  # [T-1, V]
-    token_logp = logp_all.gather(dim=-1, index=labels_shifted.unsqueeze(-1)).squeeze(
-        -1
-    )  # [T-1]
+    token_logp = logp_all.gather(dim=-1, index=labels_shifted.unsqueeze(-1)).squeeze(-1)  # [T-1]
 
     # -----------------------------
     # Build mask (label-space)
@@ -329,9 +320,7 @@ def debug_score_example(
     token_count = int(sel.numel())
     sum_logp = float(token_logp[sel].sum().item()) if token_count > 0 else 0.0
     mean_logp = (
-        float((token_logp[sel].sum() / max(token_count, 1)).item())
-        if token_count > 0
-        else 0.0
+        float((token_logp[sel].sum() / max(token_count, 1)).item()) if token_count > 0 else 0.0
     )
 
     # -----------------------------
@@ -351,12 +340,8 @@ def debug_score_example(
     print("=" * 100)
     print("DEBUG SCORE EXAMPLE")
     print("-" * 100)
-    print(
-        f"total_len={T} | prompt_len={prompt_len} | completion_len={max(0, T - prompt_len)}"
-    )
-    print(
-        f"scored_token_count={token_count} | sum_logp={sum_logp:.6f} | mean_logp={mean_logp:.6f}"
-    )
+    print(f"total_len={T} | prompt_len={prompt_len} | completion_len={max(0, T - prompt_len)}")
+    print(f"scored_token_count={token_count} | sum_logp={sum_logp:.6f} | mean_logp={mean_logp:.6f}")
     print("-" * 100)
 
     if built_prompt_text is not None:
@@ -383,9 +368,7 @@ def debug_score_example(
     else:
         # Print up to max_print_tokens tokens
         show = sel[:max_print_tokens]
-        print(
-            "Per-token logprob (label-space). Each row corresponds to predicting input_ids[pos]."
-        )
+        print("Per-token logprob (label-space). Each row corresponds to predicting input_ids[pos].")
         print("Columns: label_i | input_pos | token_id | token_str | logp | cum_logp")
         print("-" * 100)
 
@@ -393,9 +376,7 @@ def debug_score_example(
         for j, i in enumerate(show.tolist()):
             input_pos = i + 1  # label i corresponds to input token position i+1
             tok_id = int(labels_shifted[i].item())
-            tok_str = tokenizer.decode(
-                [tok_id], skip_special_tokens=skip_special_tokens
-            )
+            tok_str = tokenizer.decode([tok_id], skip_special_tokens=skip_special_tokens)
             tok_str = _format_token_str(tok_str)
 
             lp = float(token_logp[i].item())
@@ -409,10 +390,8 @@ def debug_score_example(
             if show_topk and show_topk > 0:
                 topv, topi = torch.topk(logp_all[i], k=show_topk)
                 alts = []
-                for alt_id, alt_lp in zip(topi.tolist(), topv.tolist()):
-                    s = tokenizer.decode(
-                        [int(alt_id)], skip_special_tokens=skip_special_tokens
-                    )
+                for alt_id, alt_lp in zip(topi.tolist(), topv.tolist(), strict=False):
+                    s = tokenizer.decode([int(alt_id)], skip_special_tokens=skip_special_tokens)
                     alts.append(f"{_format_token_str(s)}:{alt_lp:.3f}")
                 print(" " * 10 + "topk: " + " | ".join(alts))
 

@@ -1,23 +1,24 @@
 import sys
-import torch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from data.tokenize import tokenize_preference_example
 from data.collate import collate_preference_batch
+from data.tokenize import tokenize_preference_example
 from engine import load_tokenizer
 
 tokenizer = load_tokenizer("Qwen/Qwen2.5-0.5B-Instruct")
 
-examples = [{
-    "messages": [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Explain why the sky is blue."},
-    ],
-    "chosen": "The sky appears blue because shorter wavelengths scatter more strongly in the atmosphere (Rayleigh scattering).",
-    "rejected": "It reflects the ocean.",
-}]
+examples = [
+    {
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Explain why the sky is blue."},
+        ],
+        "chosen": "The sky appears blue because shorter wavelengths scatter more strongly in the atmosphere (Rayleigh scattering).",
+        "rejected": "It reflects the ocean.",
+    }
+]
 
 # Tokenize
 tokenized = [tokenize_preference_example(tokenizer, ex, max_len=256) for ex in examples]
@@ -39,8 +40,8 @@ print(f"  Attention mask: {batch['chosen_attention_mask'][0]}")
 print()
 
 # Manually compute real_index_input
-attention_mask = batch['chosen_attention_mask']
-prompt_lens = batch['prompt_lens']
+attention_mask = batch["chosen_attention_mask"]
+prompt_lens = batch["prompt_lens"]
 
 real_index_input = attention_mask.cumsum(dim=1) - 1
 print("real_index_input (first example, first 50 positions):")
@@ -70,7 +71,7 @@ print()
 # For the padded sequence: 8 padding + 27 prompt = 35 total before completion
 # So position 35 should have real_index=27
 
-print(f"Position 35 (should be first completion token):")
+print("Position 35 (should be first completion token):")
 print(f"  real_index_input: {real_index_input[0, 35].item()}")
 print(f"  attention_mask: {attention_mask[0, 35].item()}")
 print(f"  Is completion?: {completion_mask_input[0, 35].item()}")

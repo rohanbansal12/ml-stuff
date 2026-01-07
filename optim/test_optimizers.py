@@ -5,13 +5,13 @@ Compares custom implementations against PyTorch's built-in optimizers
 across various hyperparameter configurations.
 """
 
-import torch
-import torch.nn as nn
 import copy
 from dataclasses import dataclass
 from typing import Any
 
-from optimizers import SGDMomentum, RMSProp, Adam, AdamW, Muon
+import torch
+import torch.nn as nn
+from optimizers import Adam, AdamW, Muon, RMSProp, SGDMomentum
 
 
 class ToyMLP(nn.Module):
@@ -117,9 +117,7 @@ def run_test(config: TestConfig, data: list, seed: int = 123) -> bool:
     params_ref = run_optimization(model_ref, opt_ref, data, config.steps)
 
     # Compare
-    success, max_diffs = compare_parameters(
-        params_custom, params_ref, config.rtol, config.atol
-    )
+    success, max_diffs = compare_parameters(params_custom, params_ref, config.rtol, config.atol)
 
     # Report
     status = "✓ PASS" if success else "✗ FAIL"
@@ -227,9 +225,7 @@ def get_rmsprop_configs() -> list[TestConfig]:
             name="RMSProp all options",
             custom_cls=RMSProp,
             reference_cls=torch.optim.RMSprop,
-            kwargs=dict(
-                lr=0.001, alpha=0.95, momentum=0.9, centered=True, weight_decay=0.01
-            ),
+            kwargs=dict(lr=0.001, alpha=0.95, momentum=0.9, centered=True, weight_decay=0.01),
         ),
     ]
 
@@ -361,9 +357,7 @@ def run_muon_sanity_checks(data: list, seed: int = 123) -> bool:
     if final_loss < initial_loss:
         print(f"  ✓ PASS: Loss decreased ({initial_loss:.4f} -> {final_loss:.4f})")
     else:
-        print(
-            f"  ✗ FAIL: Loss did not decrease ({initial_loss:.4f} -> {final_loss:.4f})"
-        )
+        print(f"  ✗ FAIL: Loss did not decrease ({initial_loss:.4f} -> {final_loss:.4f})")
         all_passed = False
 
     # Test 2: Nesterov vs non-Nesterov produce different results
@@ -389,7 +383,9 @@ def run_muon_sanity_checks(data: list, seed: int = 123) -> bool:
         opt2.step()
 
     params_differ = False
-    for (n1, p1), (n2, p2) in zip(model1.named_parameters(), model2.named_parameters()):
+    for (n1, p1), (n2, p2) in zip(
+        model1.named_parameters(), model2.named_parameters(), strict=False
+    ):
         if not torch.allclose(p1, p2, atol=1e-6):
             params_differ = True
             break
@@ -443,7 +439,9 @@ def run_muon_sanity_checks(data: list, seed: int = 123) -> bool:
         opt2.step()
 
     params_differ = False
-    for (n1, p1), (n2, p2) in zip(model1.named_parameters(), model2.named_parameters()):
+    for (n1, p1), (n2, p2) in zip(
+        model1.named_parameters(), model2.named_parameters(), strict=False
+    ):
         if not torch.allclose(p1, p2, atol=1e-6):
             params_differ = True
             break

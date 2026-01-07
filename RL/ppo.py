@@ -1,14 +1,14 @@
-import torch
-import gymnasium as gym
-from gymnasium.vector import SyncVectorEnv
-from dataclasses import dataclass, asdict
-from collections import deque
 import argparse
-import numpy as np
-from torch.utils.tensorboard import SummaryWriter
 import os
+from collections import deque
+from dataclasses import asdict, dataclass
 
-from net import PPONet, ActorCriticNet
+import gymnasium as gym
+import numpy as np
+import torch
+from gymnasium.vector import SyncVectorEnv
+from net import ActorCriticNet, PPONet
+from torch.utils.tensorboard import SummaryWriter
 from util import RolloutBuffer
 
 
@@ -84,20 +84,14 @@ class Config:
 
         # Boolean flags with proper mutual exclusion
         adv_group = parser.add_mutually_exclusive_group()
-        adv_group.add_argument(
-            "--norm_advantages", action="store_true", dest="norm_advantages"
-        )
-        adv_group.add_argument(
-            "--no_norm_advantages", action="store_false", dest="norm_advantages"
-        )
+        adv_group.add_argument("--norm_advantages", action="store_true", dest="norm_advantages")
+        adv_group.add_argument("--no_norm_advantages", action="store_false", dest="norm_advantages")
         parser.set_defaults(norm_advantages=cls.norm_advantages)
 
         parser.add_argument("--num_epochs", type=int, default=cls.num_epochs)
         parser.add_argument("--num_minibatches", type=int, default=cls.num_minibatches)
         parser.add_argument("--target_kl", type=float, default=cls.target_kl)
-        parser.add_argument(
-            "--hidden_sizes", type=int, nargs="+", default=list(cls.hidden_sizes)
-        )
+        parser.add_argument("--hidden_sizes", type=int, nargs="+", default=list(cls.hidden_sizes))
         parser.add_argument("--separate_networks", action="store_true")
         parser.add_argument("--env_name", type=str, default=cls.env_name)
         parser.add_argument("--num_envs", type=int, default=cls.num_envs)
@@ -152,21 +146,17 @@ class Tracker:
         self.total_updates = 0
         self.total_episodes = 0
 
-    def log_rollout(
-        self, episode_returns: list[float], episode_lengths: list[int], steps: int
-    ):
+    def log_rollout(self, episode_returns: list[float], episode_lengths: list[int], steps: int):
         """Log metrics from a rollout."""
         self.total_steps += steps
 
-        for ret, length in zip(episode_returns, episode_lengths):
+        for ret, length in zip(episode_returns, episode_lengths, strict=False):
             self.total_episodes += 1
             self.episode_returns.append(ret)
             self.episode_lengths.append(length)
 
             self.writer.add_scalar("train_steps/episode_return", ret, self.total_steps)
-            self.writer.add_scalar(
-                "train_steps/episode_length", length, self.total_steps
-            )
+            self.writer.add_scalar("train_steps/episode_length", length, self.total_steps)
 
     def log_update(self, loss_dict: dict):
         """Log metrics from a parameter update."""
@@ -184,18 +174,10 @@ class Tracker:
         self.writer.add_scalar("train/avg_return", avg_return, self.total_updates)
         self.writer.add_scalar("train/avg_length", avg_length, self.total_updates)
         self.writer.add_scalar("train/loss", loss_dict["loss"], self.total_updates)
-        self.writer.add_scalar(
-            "train/policy_loss", loss_dict["policy_loss"], self.total_updates
-        )
-        self.writer.add_scalar(
-            "train/value_loss", loss_dict["value_loss"], self.total_updates
-        )
-        self.writer.add_scalar(
-            "train/entropy", loss_dict["entropy"], self.total_updates
-        )
-        self.writer.add_scalar(
-            "train/approx_kl", loss_dict["approx_kl"], self.total_updates
-        )
+        self.writer.add_scalar("train/policy_loss", loss_dict["policy_loss"], self.total_updates)
+        self.writer.add_scalar("train/value_loss", loss_dict["value_loss"], self.total_updates)
+        self.writer.add_scalar("train/entropy", loss_dict["entropy"], self.total_updates)
+        self.writer.add_scalar("train/approx_kl", loss_dict["approx_kl"], self.total_updates)
         self.writer.add_scalar(
             "train/clip_fraction", loss_dict["clip_fraction"], self.total_updates
         )
@@ -223,28 +205,20 @@ class Tracker:
 
 
 class PPOAgent:
-    def __init__(
-        self, obs_dim: int, action_dim: int, config: Config, device: torch.device
-    ):
+    def __init__(self, obs_dim: int, action_dim: int, config: Config, device: torch.device):
         self.config = config
         self.device = device
 
         # Choose network architecture
         if config.separate_networks:
-            self.actor_critic = PPONet(obs_dim, action_dim, config.hidden_sizes).to(
-                device
-            )
+            self.actor_critic = PPONet(obs_dim, action_dim, config.hidden_sizes).to(device)
         else:
-            self.actor_critic = ActorCriticNet(
-                obs_dim, action_dim, config.hidden_sizes
-            ).to(device)
+            self.actor_critic = ActorCriticNet(obs_dim, action_dim, config.hidden_sizes).to(device)
 
         if config.compile_model:
             self.actor_critic = torch.compile(self.actor_critic)
 
-        self.optimizer = torch.optim.Adam(
-            self.actor_critic.parameters(), lr=config.lr, eps=1e-5
-        )
+        self.optimizer = torch.optim.Adam(self.actor_critic.parameters(), lr=config.lr, eps=1e-5)
 
         # State for vectorized rollouts
         self.next_obs = None
@@ -263,14 +237,10 @@ class PPOAgent:
 
         for _ in range(self.config.rollout_steps):
             with torch.no_grad():
-                obs_tensor = torch.as_tensor(
-                    self.next_obs, device=self.device, dtype=torch.float32
-                )
+                obs_tensor = torch.as_tensor(self.next_obs, device=self.device, dtype=torch.float32)
 
                 if self.config.separate_networks:
-                    action, log_prob, _, value = self.actor_critic.get_action_and_value(
-                        obs_tensor
-                    )
+                    action, log_prob, _, value = self.actor_critic.get_action_and_value(obs_tensor)
                     value = value.squeeze(-1)
                 else:
                     action, log_prob, value = self.actor_critic.act(obs_tensor)
@@ -295,17 +265,13 @@ class PPOAgent:
 
         # Bootstrap value for incomplete trajectories
         with torch.no_grad():
-            obs_tensor = torch.as_tensor(
-                self.next_obs, device=self.device, dtype=torch.float32
-            )
+            obs_tensor = torch.as_tensor(self.next_obs, device=self.device, dtype=torch.float32)
             if self.config.separate_networks:
                 last_value = self.actor_critic.get_value(obs_tensor).squeeze(-1)
             else:
                 last_value = self.actor_critic.get_value(obs_tensor).squeeze()
 
-        buffer.compute_advantages_and_returns(
-            last_value, self.config.gamma, self.config.lam
-        )
+        buffer.compute_advantages_and_returns(last_value, self.config.gamma, self.config.lam)
 
         return {
             "episode_returns": finished_returns,
@@ -357,13 +323,13 @@ class PPOAgent:
 
                 # Forward pass
                 if self.config.separate_networks:
-                    _, new_log_probs, entropy, new_values = (
-                        self.actor_critic.get_action_and_value(mb_obs, mb_actions)
+                    _, new_log_probs, entropy, new_values = self.actor_critic.get_action_and_value(
+                        mb_obs, mb_actions
                     )
                     new_values = new_values.squeeze(-1)
                 else:
-                    new_log_probs, entropy, new_values = (
-                        self.actor_critic.evaluate_actions(mb_obs, mb_actions)
+                    new_log_probs, entropy, new_values = self.actor_critic.evaluate_actions(
+                        mb_obs, mb_actions
                     )
 
                 # Policy loss with clipping
@@ -386,9 +352,7 @@ class PPOAgent:
                     )
                     value_loss_unclipped = (new_values - mb_returns).square()
                     value_loss_clipped = (clipped_values - mb_returns).square()
-                    value_loss = (
-                        0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
-                    )
+                    value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
                 else:
                     value_loss = 0.5 * (new_values - mb_returns).square().mean()
 
@@ -415,10 +379,7 @@ class PPOAgent:
                     # Approx KL divergence (http://joschu.net/blog/kl-approx.html)
                     approx_kl = ((ratio - 1) - log_ratio).mean().item()
                     clip_fraction = (
-                        ((ratio - 1.0).abs() > self.config.clip_eps)
-                        .float()
-                        .mean()
-                        .item()
+                        ((ratio - 1.0).abs() > self.config.clip_eps).float().mean().item()
                     )
 
                 total_loss_sum += loss.item()
@@ -432,28 +393,16 @@ class PPOAgent:
             # Early stopping based on KL divergence (check after each epoch)
             if self.config.target_kl is not None:
                 # Compute average KL for this epoch
-                epoch_kl = (
-                    approx_kl_sum / num_gradient_steps if num_gradient_steps > 0 else 0
-                )
+                epoch_kl = approx_kl_sum / num_gradient_steps if num_gradient_steps > 0 else 0
                 if epoch_kl > self.config.target_kl:
                     break
 
         return {
-            "loss": total_loss_sum / num_gradient_steps
-            if num_gradient_steps > 0
-            else 0,
-            "policy_loss": policy_loss_sum / num_gradient_steps
-            if num_gradient_steps > 0
-            else 0,
-            "value_loss": value_loss_sum / num_gradient_steps
-            if num_gradient_steps > 0
-            else 0,
-            "entropy": entropy_sum / num_gradient_steps
-            if num_gradient_steps > 0
-            else 0,
-            "approx_kl": approx_kl_sum / num_gradient_steps
-            if num_gradient_steps > 0
-            else 0,
+            "loss": total_loss_sum / num_gradient_steps if num_gradient_steps > 0 else 0,
+            "policy_loss": policy_loss_sum / num_gradient_steps if num_gradient_steps > 0 else 0,
+            "value_loss": value_loss_sum / num_gradient_steps if num_gradient_steps > 0 else 0,
+            "entropy": entropy_sum / num_gradient_steps if num_gradient_steps > 0 else 0,
+            "approx_kl": approx_kl_sum / num_gradient_steps if num_gradient_steps > 0 else 0,
             "clip_fraction": clip_fraction_sum / num_gradient_steps
             if num_gradient_steps > 0
             else 0,
@@ -461,9 +410,7 @@ class PPOAgent:
             "num_epochs": final_epoch + 1,
         }
 
-    def evaluate(
-        self, env: gym.Env, num_episodes: int
-    ) -> tuple[list[float], list[int]]:
+    def evaluate(self, env: gym.Env, num_episodes: int) -> tuple[list[float], list[int]]:
         """Run deterministic evaluation episodes."""
         returns = []
         lengths = []
@@ -475,9 +422,7 @@ class PPOAgent:
 
             while True:
                 with torch.no_grad():
-                    obs_tensor = torch.as_tensor(
-                        obs, device=self.device, dtype=torch.float32
-                    )
+                    obs_tensor = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
 
                     if self.config.separate_networks:
                         logits = self.actor_critic.actor(obs_tensor.unsqueeze(0))

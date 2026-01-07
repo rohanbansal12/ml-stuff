@@ -1,16 +1,16 @@
+import argparse
+import os
+import random
+from collections import deque
+from dataclasses import asdict, dataclass
+
+import gymnasium as gym
+import numpy as np
 import torch
 import torch.nn.functional as F
-import gymnasium as gym
 from gymnasium.vector import SyncVectorEnv
-from dataclasses import dataclass, asdict
-from collections import deque
-import argparse
-import numpy as np
-import random
-from torch.utils.tensorboard import SummaryWriter
-import os
-
 from net import SoftActorNet, SoftCriticNet
+from torch.utils.tensorboard import SummaryWriter
 from util import ReplayBuffer
 
 
@@ -64,25 +64,19 @@ class Config:
         parser.add_argument("--alpha_lr", type=float, default=cls.alpha_lr)
         parser.add_argument("--gamma", type=float, default=cls.gamma)
         parser.add_argument("--tau", type=float, default=cls.tau)
-        parser.add_argument(
-            "--target_update_freq", type=int, default=cls.target_update_freq
-        )
+        parser.add_argument("--target_update_freq", type=int, default=cls.target_update_freq)
 
         # Auto-alpha with mutual exclusion
         alpha_group = parser.add_mutually_exclusive_group()
         alpha_group.add_argument("--auto_alpha", action="store_true", dest="auto_alpha")
-        alpha_group.add_argument(
-            "--no_auto_alpha", action="store_false", dest="auto_alpha"
-        )
+        alpha_group.add_argument("--no_auto_alpha", action="store_false", dest="auto_alpha")
         parser.set_defaults(auto_alpha=cls.auto_alpha)
 
         parser.add_argument("--init_alpha", type=float, default=cls.init_alpha)
         parser.add_argument("--buffer_size", type=int, default=cls.buffer_size)
         parser.add_argument("--batch_size", type=int, default=cls.batch_size)
         parser.add_argument("--learning_starts", type=int, default=cls.learning_starts)
-        parser.add_argument(
-            "--hidden_sizes", type=int, nargs="+", default=list(cls.hidden_sizes)
-        )
+        parser.add_argument("--hidden_sizes", type=int, nargs="+", default=list(cls.hidden_sizes))
         parser.add_argument("--env_name", type=str, default=cls.env_name)
         parser.add_argument("--num_envs", type=int, default=cls.num_envs)
         parser.add_argument("--total_timesteps", type=int, default=cls.total_timesteps)
@@ -156,9 +150,7 @@ class Tracker:
             self.writer.add_scalar("train/avg_return", avg_return, step)
             self.writer.add_scalar("train/avg_length", avg_length, step)
 
-    def log_eval(
-        self, mean_return: float, std_return: float, mean_length: float, step: int
-    ):
+    def log_eval(self, mean_return: float, std_return: float, mean_length: float, step: int):
         """Log evaluation metrics."""
         self.writer.add_scalar("eval/mean_return", mean_return, step)
         self.writer.add_scalar("eval/std_return", std_return, step)
@@ -189,28 +181,20 @@ class SACAgent:
         self.action_dim = action_dim
 
         # Actor network
-        self.actor = SoftActorNet(
-            obs_dim, action_dim, action_space, config.hidden_sizes
-        ).to(device)
+        self.actor = SoftActorNet(obs_dim, action_dim, action_space, config.hidden_sizes).to(device)
 
         # Twin Q-networks
         self.q1 = SoftCriticNet(obs_dim, action_dim, config.hidden_sizes).to(device)
         self.q2 = SoftCriticNet(obs_dim, action_dim, config.hidden_sizes).to(device)
 
         # Target Q-networks
-        self.q1_target = SoftCriticNet(obs_dim, action_dim, config.hidden_sizes).to(
-            device
-        )
-        self.q2_target = SoftCriticNet(obs_dim, action_dim, config.hidden_sizes).to(
-            device
-        )
+        self.q1_target = SoftCriticNet(obs_dim, action_dim, config.hidden_sizes).to(device)
+        self.q2_target = SoftCriticNet(obs_dim, action_dim, config.hidden_sizes).to(device)
         self.q1_target.load_state_dict(self.q1.state_dict())
         self.q2_target.load_state_dict(self.q2.state_dict())
 
         # Optimizers
-        self.actor_optimizer = torch.optim.Adam(
-            self.actor.parameters(), lr=config.policy_lr
-        )
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=config.policy_lr)
         self.q_optimizer = torch.optim.Adam(
             list(self.q1.parameters()) + list(self.q2.parameters()),
             lr=config.q_lr,
@@ -222,9 +206,7 @@ class SACAgent:
             # Target entropy is -dim(A) (heuristic from SAC paper)
             self.target_entropy = -action_dim
             self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
-            self.alpha_optimizer = torch.optim.Adam(
-                [self.log_alpha], lr=config.alpha_lr
-            )
+            self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=config.alpha_lr)
             self.alpha = self.log_alpha.exp().item()
         else:
             self.alpha = config.init_alpha
@@ -236,9 +218,7 @@ class SACAgent:
             if deterministic:
                 # Use mean action for evaluation
                 mean, _ = self.actor(obs_tensor)
-                action = (
-                    torch.tanh(mean) * self.actor.action_scale + self.actor.action_bias
-                )
+                action = torch.tanh(mean) * self.actor.action_scale + self.actor.action_bias
             else:
                 action, _ = self.actor.get_action(obs_tensor)
             return action.cpu().numpy()
@@ -280,9 +260,7 @@ class SACAgent:
         # ----- Update Alpha -----
         alpha_loss = 0.0
         if self.auto_alpha:
-            alpha_loss = (
-                -self.log_alpha.exp() * (log_probs + self.target_entropy).detach()
-            ).mean()
+            alpha_loss = (-self.log_alpha.exp() * (log_probs + self.target_entropy).detach()).mean()
 
             self.alpha_optimizer.zero_grad()
             alpha_loss.backward()
@@ -303,14 +281,12 @@ class SACAgent:
 
     def _soft_update(self, source: torch.nn.Module, target: torch.nn.Module):
         """Polyak averaging update for target network."""
-        for param, target_param in zip(source.parameters(), target.parameters()):
+        for param, target_param in zip(source.parameters(), target.parameters(), strict=False):
             target_param.data.copy_(
                 self.config.tau * param.data + (1 - self.config.tau) * target_param.data
             )
 
-    def evaluate(
-        self, env: gym.Env, num_episodes: int
-    ) -> tuple[list[float], list[int]]:
+    def evaluate(self, env: gym.Env, num_episodes: int) -> tuple[list[float], list[int]]:
         """Run deterministic evaluation episodes."""
         returns = []
         lengths = []
@@ -406,9 +382,7 @@ def main():
         # Select action
         if global_step < config.learning_starts:
             # Random actions during warmup
-            actions = np.array(
-                [env.single_action_space.sample() for _ in range(config.num_envs)]
-            )
+            actions = np.array([env.single_action_space.sample() for _ in range(config.num_envs)])
         else:
             actions = agent.select_action(obs, deterministic=False)
 

@@ -1,24 +1,24 @@
+import copy
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import copy
-import time
 from ptq_utils import (
-    evaluate_simple,
-    get_batch_1d,
-    force_fp32_gemm_all_linears,
-    include,
-    exclude,
-    attach_linear_input_hooks,
-    get_module_by_name,
-    set_module_by_name,
-    quantize_model_w4,
     AWQW4Packed,
-    load_model,
+    attach_linear_input_hooks,
     create_layer_filter,
+    evaluate_simple,
+    exclude,
+    force_fp32_gemm_all_linears,
+    get_batch_1d,
+    get_module_by_name,
+    include,
+    load_model,
+    quantize_model_w4,
+    set_module_by_name,
     setup_eval_data,
 )
-
 
 # -----------------------------
 # Config
@@ -110,9 +110,7 @@ def compute_saliency_stats(
 
 
 @torch.no_grad()
-def scaling_search(
-    model, saliency_stats, k_ratio=0.1, group_size=32, smin=None, smax=None
-):
+def scaling_search(model, saliency_stats, k_ratio=0.1, group_size=32, smin=None, smax=None):
     scale_dict = {}
     device = next(model.parameters()).device
 
@@ -254,9 +252,7 @@ def eval_harness(tokens, full_eval_data, device, include_filter, exclude_filter,
     )
     print(f"AWQ4Packed {label}:  Loss:{loss:.6f} | Perp:{perp:.6f}")
 
-    print(
-        f"Speedup (AWQ4Packed vs W4): {t_w4 / t_awq:.2f}x (time), {r_awq / r_w4:.2f}x (tok/s)"
-    )
+    print(f"Speedup (AWQ4Packed vs W4): {t_w4 / t_awq:.2f}x (time), {r_awq / r_w4:.2f}x (tok/s)")
 
 
 # -----------------------------
@@ -272,15 +268,20 @@ def main():
     print("Loading:", MODEL_NAME)
 
     val_tokens, full_eval_data = setup_eval_data(
-        MODEL_NAME, DATASET_NAME, DATASET_CONFIG, DATASET_SPLIT,
-        BATCH_SIZE, MAX_SEQ_LEN, EVALUATION_BATCHES, SEED, device
+        MODEL_NAME,
+        DATASET_NAME,
+        DATASET_CONFIG,
+        DATASET_SPLIT,
+        BATCH_SIZE,
+        MAX_SEQ_LEN,
+        EVALUATION_BATCHES,
+        SEED,
+        device,
     )
 
     # Evaluate baseline models
     fp_model = load_model(MODEL_NAME, device)
-    fp_loss, fp_ppl, _, _ = time_evaluate_simple(
-        fp_model, full_eval_data, device, label="FP"
-    )
+    fp_loss, fp_ppl, _, _ = time_evaluate_simple(fp_model, full_eval_data, device, label="FP")
     print(f"FP:    Loss:{fp_loss:.6f} | Perp:{fp_ppl:.6f}")
 
     fp32g_model = force_fp32_gemm_all_linears(

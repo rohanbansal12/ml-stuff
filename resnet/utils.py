@@ -1,25 +1,24 @@
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
 import torch
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+
 
 def get_cifar_data():
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.4914, 0.4822, 0.4465],
-            std=[0.2470, 0.2435, 0.2616]
-        ),
-    ])
+    transform_train = transforms.Compose(
+        [
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]),
+        ]
+    )
 
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.4914, 0.4822, 0.4465],
-            std=[0.2470, 0.2435, 0.2616]
-        ),
-    ])
+    transform_test = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616]),
+        ]
+    )
 
     train_dataset = datasets.CIFAR10(
         root="./data",
@@ -35,6 +34,7 @@ def get_cifar_data():
     )
 
     return transform_train, transform_test, train_dataset, test_dataset
+
 
 def get_dataloaders(batch_size, num_workers):
     transform_train, transform_test, train_dataset, test_dataset = get_cifar_data()
@@ -55,6 +55,7 @@ def get_dataloaders(batch_size, num_workers):
     )
 
     return train_loader, test_loader
+
 
 # -----------------------
 # Training & Eval Functions

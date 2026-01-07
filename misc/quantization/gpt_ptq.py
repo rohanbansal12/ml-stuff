@@ -1,23 +1,21 @@
-import torch
 import copy
-
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from ptq_utils import (
-    evaluate_simple,
-    get_batch_1d,
-    force_fp32_gemm_all_linears,
-    calibrate,
-    quantize_model_w8a8,
-    quantize_model_w4,
-    include,
-    exclude
-)
-
 import sys
+
+import torch
+from ptq_utils import (
+    calibrate,
+    evaluate_simple,
+    exclude,
+    force_fp32_gemm_all_linears,
+    get_batch_1d,
+    include,
+    quantize_model_w4,
+    quantize_model_w8a8,
+)
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.append(".")
 from GPT.utils import load_shakespeare  # reuse your local shakespeare loader
-
 
 # -----------------------------
 # Config (tune for your 4090)
@@ -35,6 +33,7 @@ SEED = 25
 
 # local text file (reuse your existing path)
 TEXT_PATH = "/workspace/ml-stuff/data/shakespeare.txt"
+
 
 # -----------------------------
 # Main
@@ -86,7 +85,6 @@ def main():
     loss, perp = evaluate_simple(fp32g_model, full_eval_data)
     print(f"FP32:    Loss:{loss:.6f} | Perp:{perp:.6f}")
 
-
     # -----------------------------
     # QuantLinearW8A8 Experiments
     # -----------------------------
@@ -119,7 +117,6 @@ def main():
         print(
             f"{mode}:     Loss:{q_loss:.6f} | Perp:{q_ppl:.6f} | Delta: (Quant-FP) loss: {q_loss - fp_loss:+.6e}"
         )
-
 
     # -----------------------------
     # QuantLinearW4 Experiments

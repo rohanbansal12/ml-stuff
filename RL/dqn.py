@@ -1,16 +1,16 @@
+import argparse
+import os
+import random
+from collections import deque
+from dataclasses import asdict, dataclass
+
+import gymnasium as gym
+import numpy as np
 import torch
 import torch.nn.functional as F
-import gymnasium as gym
 from gymnasium.vector import SyncVectorEnv
-from dataclasses import dataclass, asdict
-from collections import deque
-import argparse
-import numpy as np
-import random
-from torch.utils.tensorboard import SummaryWriter
-import os
-
 from net import QNet
+from torch.utils.tensorboard import SummaryWriter
 from util import ReplayBuffer
 
 
@@ -65,16 +65,12 @@ class Config:
         parser.add_argument("--eps_start", type=float, default=cls.eps_start)
         parser.add_argument("--eps_end", type=float, default=cls.eps_end)
         parser.add_argument("--eps_decay_steps", type=int, default=cls.eps_decay_steps)
-        parser.add_argument(
-            "--target_update_freq", type=int, default=cls.target_update_freq
-        )
+        parser.add_argument("--target_update_freq", type=int, default=cls.target_update_freq)
         parser.add_argument("--tau", type=float, default=cls.tau)
         parser.add_argument("--buffer_size", type=int, default=cls.buffer_size)
         parser.add_argument("--batch_size", type=int, default=cls.batch_size)
         parser.add_argument("--learning_starts", type=int, default=cls.learning_starts)
-        parser.add_argument(
-            "--hidden_sizes", type=int, nargs="+", default=list(cls.hidden_sizes)
-        )
+        parser.add_argument("--hidden_sizes", type=int, nargs="+", default=list(cls.hidden_sizes))
         parser.add_argument("--env_name", type=str, default=cls.env_name)
         parser.add_argument("--num_envs", type=int, default=cls.num_envs)
         parser.add_argument("--total_timesteps", type=int, default=cls.total_timesteps)
@@ -142,9 +138,7 @@ class Tracker:
             avg_return = sum(self.episode_returns) / len(self.episode_returns)
             self.writer.add_scalar("train/avg_return", avg_return, step)
 
-    def log_eval(
-        self, mean_return: float, std_return: float, mean_length: float, step: int
-    ):
+    def log_eval(self, mean_return: float, std_return: float, mean_length: float, step: int):
         """Log evaluation metrics."""
         self.writer.add_scalar("eval/mean_return", mean_return, step)
         self.writer.add_scalar("eval/std_return", std_return, step)
@@ -162,9 +156,7 @@ class Tracker:
 class DQNAgent:
     """Deep Q-Network agent."""
 
-    def __init__(
-        self, obs_dim: int, action_dim: int, config: Config, device: torch.device
-    ):
+    def __init__(self, obs_dim: int, action_dim: int, config: Config, device: torch.device):
         self.config = config
         self.device = device
         self.action_dim = action_dim
@@ -249,15 +241,13 @@ class DQNAgent:
             target_param = tau * param + (1 - tau) * target_param
         """
         for param, target_param in zip(
-            self.q_net.parameters(), self.target_net.parameters()
+            self.q_net.parameters(), self.target_net.parameters(), strict=False
         ):
             target_param.data.copy_(
                 self.config.tau * param.data + (1 - self.config.tau) * target_param.data
             )
 
-    def evaluate(
-        self, env: gym.Env, num_episodes: int
-    ) -> tuple[list[float], list[int]]:
+    def evaluate(self, env: gym.Env, num_episodes: int) -> tuple[list[float], list[int]]:
         """Run deterministic evaluation episodes (epsilon=0)."""
         returns = []
         lengths = []
@@ -348,9 +338,7 @@ def main():
         # Select action
         if global_step < config.learning_starts:
             # Random actions during warmup
-            actions = np.array(
-                [env.single_action_space.sample() for _ in range(config.num_envs)]
-            )
+            actions = np.array([env.single_action_space.sample() for _ in range(config.num_envs)])
         else:
             # Epsilon-greedy action selection
             # Note: For vectorized env, we need to handle each obs separately

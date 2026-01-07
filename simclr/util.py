@@ -1,19 +1,26 @@
-from torchvision import transforms as T
 import torch
+from torchvision import transforms as T
+
 
 def get_simclr_transform():
-    return T.Compose([
-        T.RandomResizedCrop(size=32, scale=(0.2, 1.0)),
-        T.RandomHorizontalFlip(p=0.5),
-        T.ColorJitter(0.4, 0.4, 0.4, 0.1),
-        T.RandomGrayscale(p=0.2),
-        T.ToTensor(),
-    ])
+    return T.Compose(
+        [
+            T.RandomResizedCrop(size=32, scale=(0.2, 1.0)),
+            T.RandomHorizontalFlip(p=0.5),
+            T.ColorJitter(0.4, 0.4, 0.4, 0.1),
+            T.RandomGrayscale(p=0.2),
+            T.ToTensor(),
+        ]
+    )
+
 
 def get_eval_transform():
-    return T.Compose([
-        T.ToTensor(),
-    ])
+    return T.Compose(
+        [
+            T.ToTensor(),
+        ]
+    )
+
 
 class SimCLRDataset(torch.utils.data.Dataset):
     def __init__(self, base_dataset, transform):

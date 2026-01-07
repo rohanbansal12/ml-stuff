@@ -21,38 +21,37 @@ Usage:
     python train_latent.py --preset fast --vae-checkpoint /path/to/vae.pt --num-classes 10 --guidance-scale 5.0
 """
 
-import torch
-import torch.nn.functional as F
-from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DataLoader
-import torchvision
-from torchvision.models import inception_v3, Inception_V3_Weights
-import numpy as np
-from scipy import linalg
-from pathlib import Path
-from datetime import datetime
 import argparse
 import sys
-from typing import Optional
 from contextlib import nullcontext
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torchvision
+from scipy import linalg
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from torchvision.models import Inception_V3_Weights, inception_v3
 from tqdm import tqdm
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from latent_diffusion.config import LatentDiffusionFullConfig, LATENT_PRESETS
-from latent_diffusion.model import LatentUNet, count_parameters
-from latent_diffusion.diffusion import (
-    NoiseSchedule,
-    DDPMSampler,
-    DDIMSampler,
-    q_sample,
-    get_target,
-)
-
-from vae.model import VAE
-from vae.config import VAEConfig
-
 import warnings
+
+from latent_diffusion.config import LATENT_PRESETS, LatentDiffusionFullConfig
+from latent_diffusion.diffusion import (
+    DDIMSampler,
+    DDPMSampler,
+    NoiseSchedule,
+    get_target,
+    q_sample,
+)
+from latent_diffusion.model import LatentUNet, count_parameters
+from vae.config import VAEConfig
+from vae.model import VAE
 
 warnings.filterwarnings("ignore", message="dtype.*align")
 
@@ -98,9 +97,7 @@ class InceptionFeatureExtractor:
         return self.inception(x)
 
 
-def compute_fid(
-    real_features: np.ndarray, fake_features: np.ndarray, eps: float = 1e-6
-) -> float:
+def compute_fid(real_features: np.ndarray, fake_features: np.ndarray, eps: float = 1e-6) -> float:
     """
     Compute Fréchet Inception Distance between two sets of features.
 
@@ -235,9 +232,7 @@ class LatentDataset(torch.utils.data.Dataset):
         scale: Latent scaling factor for unit variance.
     """
 
-    def __init__(
-        self, base_dataset, vae: VAE, device: torch.device, scale: float = 1.0
-    ):
+    def __init__(self, base_dataset, vae: VAE, device: torch.device, scale: float = 1.0):
         """
         Initialize latent dataset wrapper.
 
@@ -359,9 +354,7 @@ class EMA:
         """Update shadow weights with current model weights."""
         for name, param in self.model.named_parameters():
             if param.requires_grad:
-                self.shadow[name] = (
-                    self.decay * self.shadow[name] + (1 - self.decay) * param.data
-                )
+                self.shadow[name] = self.decay * self.shadow[name] + (1 - self.decay) * param.data
 
     def apply_shadow(self):
         """
@@ -441,11 +434,11 @@ def train_one_epoch(
     schedule: NoiseSchedule,
     config: LatentDiffusionFullConfig,
     device: torch.device,
-    ema: Optional[EMA],
+    ema: EMA | None,
     writer: SummaryWriter,
     epoch: int,
-    scaler: Optional[torch.amp.GradScaler] = None,
-    autocast_dtype: Optional[torch.dtype] = None,
+    scaler: torch.amp.GradScaler | None = None,
+    autocast_dtype: torch.dtype | None = None,
 ) -> float:
     """
     Train the latent diffusion model for one epoch.
@@ -517,9 +510,7 @@ def train_one_epoch(
         z_t = q_sample(z_0, t=t, schedule=schedule, noise=noise)
 
         # Get target based on prediction type
-        target = get_target(
-            z_0, noise=noise, t=t, schedule=schedule, pred_type=pred_type
-        )
+        target = get_target(z_0, noise=noise, t=t, schedule=schedule, pred_type=pred_type)
 
         # Forward pass and loss
         optimizer.zero_grad()
@@ -530,9 +521,7 @@ def train_one_epoch(
 
             # Compute per-sample losses for timestep buckets (no extra forward pass)
             with torch.no_grad():
-                per_sample_loss = F.mse_loss(pred, target, reduction="none").mean(
-                    dim=(1, 2, 3)
-                )
+                per_sample_loss = F.mse_loss(pred, target, reduction="none").mean(dim=(1, 2, 3))
                 for i, t_val in enumerate(t.tolist()):
                     if t_val < T // 3:
                         loss_buckets["low"].append(per_sample_loss[i].item())
@@ -552,9 +541,7 @@ def train_one_epoch(
             else:
                 # Compute grad norm even without clipping
                 scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), float("inf")
-                )
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
             scaler.step(optimizer)
             scaler.update()
         else:
@@ -564,9 +551,7 @@ def train_one_epoch(
                     model.parameters(), config.train.grad_clip
                 )
             else:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), float("inf")
-                )
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
             optimizer.step()
 
         # Update EMA
@@ -579,8 +564,7 @@ def train_one_epoch(
         global_step = epoch * num_batches + step
         if (step + 1) % config.train.log_every == 0:
             print(
-                f"Epoch {epoch:03d} Step {step + 1:04d}/{num_batches} | "
-                f"Loss: {loss.item():.4f}"
+                f"Epoch {epoch:03d} Step {step + 1:04d}/{num_batches} | " f"Loss: {loss.item():.4f}"
             )
             writer.add_scalar("Loss/train_step", loss.item(), global_step)
 
@@ -612,8 +596,8 @@ def generate_samples(
     config: LatentDiffusionFullConfig,
     device: torch.device,
     num_samples: int = 16,
-    z_T: Optional[torch.Tensor] = None,
-    class_labels: Optional[torch.Tensor] = None,
+    z_T: torch.Tensor | None = None,
+    class_labels: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Generate image samples via latent diffusion.
@@ -646,9 +630,7 @@ def generate_samples(
 
     # Generate random class labels if conditional but none provided
     if config.model.num_classes > 0 and class_labels is None:
-        class_labels = torch.randint(
-            0, config.model.num_classes, (num_samples,), device=device
-        )
+        class_labels = torch.randint(0, config.model.num_classes, (num_samples,), device=device)
 
     # Run reverse diffusion in latent space
     z_0 = sampler.sample(
@@ -677,7 +659,7 @@ def save_checkpoint(
     path: Path,
     model: LatentUNet,
     optimizer: torch.optim.Optimizer,
-    ema: Optional[EMA],
+    ema: EMA | None,
     epoch: int,
     config: LatentDiffusionFullConfig,
     loss: float,
@@ -973,15 +955,12 @@ def main():
     config.save(log_dir / "config.json")
 
     # Fixed noise for consistent visualization across epochs
-    fixed_z_T = torch.randn(
-        config.train.num_samples, *config.latent_shape, device=device
-    )
+    fixed_z_T = torch.randn(config.train.num_samples, *config.latent_shape, device=device)
 
     # Fixed class labels for visualization (one of each class if conditional)
     if config.model.num_classes > 0:
         fixed_class_labels = (
-            torch.arange(config.train.num_samples, device=device)
-            % config.model.num_classes
+            torch.arange(config.train.num_samples, device=device) % config.model.num_classes
         )
     else:
         fixed_class_labels = None

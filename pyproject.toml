@@ -47,6 +47,7 @@ dependencies = [
 dev = [
     "ruff",
     "pytest",
+    "pre-commit",
 ]
 
 [tool.uv]
@@ -67,3 +68,24 @@ torch = [
 torchvision = [
     { index = "pytorch-cu124", marker = "sys_platform == 'linux'" },
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort (import sorting)
+    "UP",     # pyupgrade (modernize syntax)
+    "B",      # flake8-bugbear (common bugs)
+]
+ignore = [
+    "E501",   # line too long (formatter handles this)
+    "B007",   # unused loop control variable
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]  # unused imports ok in __init__

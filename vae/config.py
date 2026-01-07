@@ -1,63 +1,67 @@
 """
 VAE Configuration - extends the existing config system.
 """
-from dataclasses import dataclass, field, asdict
-from typing import Literal, Optional
+
 import json
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass
 class VAEModelConfig:
     """VAE architecture configuration."""
-    channels: int = 64                      # Base channel count
-    channel_mults: tuple = (1, 2, 4)        # Multipliers for each resolution level
-    latent_dim: int = 128                   # Dimension of latent space (for vanilla VAE)
-    latent_channels: int = 4                # Channels in spatial latent (for conv VAE)
-    groups: int = 8                         # GroupNorm groups
-    num_res_blocks: int = 2                 # ResBlocks per resolution level
-    use_spatial_latent: bool = True         # If True: latent is (B, C, H, W), else (B, D)
+
+    channels: int = 64  # Base channel count
+    channel_mults: tuple = (1, 2, 4)  # Multipliers for each resolution level
+    latent_dim: int = 128  # Dimension of latent space (for vanilla VAE)
+    latent_channels: int = 4  # Channels in spatial latent (for conv VAE)
+    groups: int = 8  # GroupNorm groups
+    num_res_blocks: int = 2  # ResBlocks per resolution level
+    use_spatial_latent: bool = True  # If True: latent is (B, C, H, W), else (B, D)
 
 
 @dataclass
 class DiscriminatorConfig:
     """PatchGAN discriminator configuration."""
-    channels: int = 64                      # Base channel count
-    n_layers: int = 3                       # Number of conv layers
-    use_spectral_norm: bool = True          # Spectral normalization for stability
+
+    channels: int = 64  # Base channel count
+    n_layers: int = 3  # Number of conv layers
+    use_spectral_norm: bool = True  # Spectral normalization for stability
 
 
 @dataclass
 class VAETrainConfig:
     """VAE training configuration."""
+
     batch_size: int = 128
     num_workers: int = 4
     epochs: int = 100
-    lr: float = 1e-4                        # Reduced from 1e-3 for GAN stability
+    lr: float = 1e-4  # Reduced from 1e-3 for GAN stability
     weight_decay: float = 0.0
-    
+
     # VAE-specific
-    kl_weight: float = 1.0                  # β in β-VAE
-    kl_warmup_epochs: int = 10              # Linear warmup for KL weight
+    kl_weight: float = 1.0  # β in β-VAE
+    kl_warmup_epochs: int = 10  # Linear warmup for KL weight
     recon_loss: Literal["mse", "l1"] = "mse"
-    
+
     # Perceptual loss (LPIPS)
-    use_lpips: bool = False                 # Enable LPIPS perceptual loss
-    lpips_weight: float = 0.1               # Weight for LPIPS loss
-    
+    use_lpips: bool = False  # Enable LPIPS perceptual loss
+    lpips_weight: float = 0.1  # Weight for LPIPS loss
+
     # Adversarial loss (GAN)
-    use_adversarial: bool = False           # Enable adversarial training
-    adv_weight: float = 0.1                 # Weight for adversarial loss
-    adv_start_epoch: int = 0                # Epoch to start adversarial training
-    disc_lr: float = 1e-4                   # Discriminator learning rate
-    disc_steps: int = 1                     # Discriminator steps per generator step
-    
+    use_adversarial: bool = False  # Enable adversarial training
+    adv_weight: float = 0.1  # Weight for adversarial loss
+    adv_start_epoch: int = 0  # Epoch to start adversarial training
+    disc_lr: float = 1e-4  # Discriminator learning rate
+    disc_steps: int = 1  # Discriminator steps per generator step
+
     # Logging
     log_every: int = 50
     sample_every: int = 5
     save_every: int = 20
     num_samples: int = 16
-    
+
     # Performance
     mixed_precision: Literal["no", "fp16", "bf16"] = "no"
     compile_model: bool = False
@@ -67,20 +71,21 @@ class VAETrainConfig:
 @dataclass
 class VAEConfig:
     """Master VAE configuration."""
+
     model: VAEModelConfig = field(default_factory=VAEModelConfig)
     discriminator: DiscriminatorConfig = field(default_factory=DiscriminatorConfig)
     train: VAETrainConfig = field(default_factory=VAETrainConfig)
-    
+
     # Experiment metadata
-    run_name: Optional[str] = None
+    run_name: str | None = None
     seed: int = 42
     data_dir: str = "./data"
     log_dir: str = "./runs"
-    
+
     def save(self, path: Path):
         with open(path, "w") as f:
             json.dump(asdict(self), f, indent=2)
-    
+
     @classmethod
     def load(cls, path: Path) -> "VAEConfig":
         with open(path) as f:
@@ -99,7 +104,9 @@ class VAEConfig:
 # Presets
 VAE_PRESETS = {
     "tiny": VAEConfig(
-        model=VAEModelConfig(channels=32, channel_mults=(1, 2), num_res_blocks=1, latent_channels=2),
+        model=VAEModelConfig(
+            channels=32, channel_mults=(1, 2), num_res_blocks=1, latent_channels=2
+        ),
         train=VAETrainConfig(epochs=20),
     ),
     "small": VAEConfig(

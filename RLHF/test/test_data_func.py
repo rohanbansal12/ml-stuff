@@ -1,27 +1,28 @@
 import sys
-import torch
-import pytest
 from pathlib import Path
+
+import pytest
+import torch
 
 # Add parent directory to path to import modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from data.collate import (
+    collate_preference_batch,
+    make_response_mask_label_space,
+)
 from data.formats import build_prompt_from_messages
 from data.tokenize import (
-    tokenize_prompt_plus_completion,
-    tokenize_preference_example,
     TokenizedPreferenceExample,
-)
-from data.collate import (
-    make_response_mask_label_space,
-    collate_preference_batch,
+    tokenize_preference_example,
+    tokenize_prompt_plus_completion,
 )
 from engine import load_tokenizer
-
 
 # -----------------------------
 # Fixtures
 # -----------------------------
+
 
 @pytest.fixture(scope="module")
 def tokenizer():
@@ -53,6 +54,7 @@ def sample_preference_example():
 # -----------------------------
 # Test formats.py
 # -----------------------------
+
 
 class TestBuildPromptFromMessages:
     def test_returns_tuple_of_three(self, tokenizer, sample_messages):
@@ -110,13 +112,12 @@ class TestBuildPromptFromMessages:
 # Test tokenize.py
 # -----------------------------
 
+
 class TestTokenizePromptPlusCompletion:
     def test_output_structure(self, tokenizer, sample_messages):
         """Test that output has expected keys."""
         _, prompt_ids_1d, _ = build_prompt_from_messages(tokenizer, sample_messages)
-        result = tokenize_prompt_plus_completion(
-            tokenizer, prompt_ids_1d, "Hello!", max_len=100
-        )
+        result = tokenize_prompt_plus_completion(tokenizer, prompt_ids_1d, "Hello!", max_len=100)
 
         assert isinstance(result, dict)
         assert "input_ids_1d" in result
@@ -143,8 +144,7 @@ class TestTokenizePromptPlusCompletion:
 
         max_len = 10
         result = tokenize_prompt_plus_completion(
-            tokenizer, prompt_ids_1d, completion_text,
-            max_len=max_len, truncation_side="left"
+            tokenizer, prompt_ids_1d, completion_text, max_len=max_len, truncation_side="left"
         )
 
         assert result["input_ids_1d"].numel() <= max_len
@@ -158,8 +158,7 @@ class TestTokenizePromptPlusCompletion:
 
         max_len = 10
         result = tokenize_prompt_plus_completion(
-            tokenizer, prompt_ids_1d, completion_text,
-            max_len=max_len, truncation_side="right"
+            tokenizer, prompt_ids_1d, completion_text, max_len=max_len, truncation_side="right"
         )
 
         assert result["input_ids_1d"].numel() <= max_len
@@ -169,18 +168,14 @@ class TestTokenizePromptPlusCompletion:
     def test_attention_mask_all_ones(self, tokenizer, sample_messages):
         """Test that attention mask is all ones (no padding)."""
         _, prompt_ids_1d, _ = build_prompt_from_messages(tokenizer, sample_messages)
-        result = tokenize_prompt_plus_completion(
-            tokenizer, prompt_ids_1d, "Test", max_len=100
-        )
+        result = tokenize_prompt_plus_completion(tokenizer, prompt_ids_1d, "Test", max_len=100)
 
         assert torch.all(result["attention_mask_1d"] == 1)
 
     def test_empty_completion(self, tokenizer, sample_messages):
         """Test with empty completion string."""
         _, prompt_ids_1d, _ = build_prompt_from_messages(tokenizer, sample_messages)
-        result = tokenize_prompt_plus_completion(
-            tokenizer, prompt_ids_1d, "", max_len=100
-        )
+        result = tokenize_prompt_plus_completion(tokenizer, prompt_ids_1d, "", max_len=100)
 
         # Empty completion should result in zero completion_len
         assert result["completion_len"] == 0
@@ -190,16 +185,12 @@ class TestTokenizePromptPlusCompletion:
 class TestTokenizePreferenceExample:
     def test_output_type(self, tokenizer, sample_preference_example):
         """Test that output is TokenizedPreferenceExample."""
-        result = tokenize_preference_example(
-            tokenizer, sample_preference_example, max_len=256
-        )
+        result = tokenize_preference_example(tokenizer, sample_preference_example, max_len=256)
         assert isinstance(result, TokenizedPreferenceExample)
 
     def test_has_required_fields(self, tokenizer, sample_preference_example):
         """Test that result has all required fields."""
-        result = tokenize_preference_example(
-            tokenizer, sample_preference_example, max_len=256
-        )
+        result = tokenize_preference_example(tokenizer, sample_preference_example, max_len=256)
 
         assert hasattr(result, "prompt_text")
         assert hasattr(result, "chosen_text")
@@ -214,9 +205,7 @@ class TestTokenizePreferenceExample:
 
     def test_shared_prompt_len(self, tokenizer, sample_preference_example):
         """Test that chosen and rejected share the same prompt_len."""
-        result = tokenize_preference_example(
-            tokenizer, sample_preference_example, max_len=256
-        )
+        result = tokenize_preference_example(tokenizer, sample_preference_example, max_len=256)
 
         # Both sequences should have the same prompt_len
         assert result.prompt_len >= 0
@@ -224,18 +213,14 @@ class TestTokenizePreferenceExample:
     def test_respects_max_len(self, tokenizer, sample_preference_example):
         """Test that sequences don't exceed max_len."""
         max_len = 64
-        result = tokenize_preference_example(
-            tokenizer, sample_preference_example, max_len=max_len
-        )
+        result = tokenize_preference_example(tokenizer, sample_preference_example, max_len=max_len)
 
         assert result.chosen_input_ids_1d.numel() <= max_len
         assert result.rejected_input_ids_1d.numel() <= max_len
 
     def test_tensors_are_1d(self, tokenizer, sample_preference_example):
         """Test that all tensor outputs are 1D."""
-        result = tokenize_preference_example(
-            tokenizer, sample_preference_example, max_len=256
-        )
+        result = tokenize_preference_example(tokenizer, sample_preference_example, max_len=256)
 
         assert result.chosen_input_ids_1d.dim() == 1
         assert result.chosen_attention_mask_1d.dim() == 1
@@ -244,9 +229,7 @@ class TestTokenizePreferenceExample:
 
     def test_attention_masks_all_ones(self, tokenizer, sample_preference_example):
         """Test that attention masks are all ones (no padding yet)."""
-        result = tokenize_preference_example(
-            tokenizer, sample_preference_example, max_len=256
-        )
+        result = tokenize_preference_example(tokenizer, sample_preference_example, max_len=256)
 
         assert torch.all(result.chosen_attention_mask_1d == 1)
         assert torch.all(result.rejected_attention_mask_1d == 1)
@@ -267,9 +250,7 @@ class TestTokenizePreferenceExample:
 
     def test_length_consistency(self, tokenizer, sample_preference_example):
         """Test that prompt_len + completion_len equals total length."""
-        result = tokenize_preference_example(
-            tokenizer, sample_preference_example, max_len=256
-        )
+        result = tokenize_preference_example(tokenizer, sample_preference_example, max_len=256)
 
         chosen_total = result.prompt_len + result.chosen_completion_len
         rejected_total = result.prompt_len + result.rejected_completion_len
@@ -281,6 +262,7 @@ class TestTokenizePreferenceExample:
 # -----------------------------
 # Test collate.py
 # -----------------------------
+
 
 class TestMakeResponseMaskLabelSpace:
     def test_output_shape(self):
@@ -314,8 +296,8 @@ class TestMakeResponseMaskLabelSpace:
         # In label space, response should start at index prompt_len - 1
         # mask[0, :prompt_len-1] should be False
         # mask[0, prompt_len-1:] should be True (if attention is 1)
-        assert not mask[0, :prompt_len - 1].any()  # All False before response
-        assert mask[0, prompt_len - 1:].all()  # All True for response
+        assert not mask[0, : prompt_len - 1].any()  # All False before response
+        assert mask[0, prompt_len - 1 :].all()  # All True for response
 
     def test_respects_attention_mask(self):
         """Test that mask respects attention mask (padding)."""
@@ -453,9 +435,7 @@ class TestCollatePreferenceBatch:
 
     def test_single_example_batch(self, tokenizer, sample_preference_example):
         """Test collation with a single example."""
-        examples = [
-            tokenize_preference_example(tokenizer, sample_preference_example, max_len=256)
-        ]
+        examples = [tokenize_preference_example(tokenizer, sample_preference_example, max_len=256)]
 
         batch = collate_preference_batch(tokenizer, examples)
 
@@ -469,9 +449,7 @@ class TestCollatePreferenceBatch:
         original_padding_side = tokenizer.padding_side
         tokenizer.padding_side = "right"
 
-        examples = [
-            tokenize_preference_example(tokenizer, sample_preference_example, max_len=256)
-        ]
+        examples = [tokenize_preference_example(tokenizer, sample_preference_example, max_len=256)]
 
         with pytest.raises(AssertionError, match="left"):
             collate_preference_batch(tokenizer, examples)
@@ -483,6 +461,7 @@ class TestCollatePreferenceBatch:
 # -----------------------------
 # Integration tests
 # -----------------------------
+
 
 class TestEndToEndPipeline:
     def test_full_pipeline(self, tokenizer):
@@ -501,10 +480,7 @@ class TestEndToEndPipeline:
         ]
 
         # Step 1: Tokenize
-        tokenized = [
-            tokenize_preference_example(tokenizer, ex, max_len=256)
-            for ex in raw_examples
-        ]
+        tokenized = [tokenize_preference_example(tokenizer, ex, max_len=256) for ex in raw_examples]
 
         # Step 2: Collate
         batch = collate_preference_batch(tokenizer, tokenized)
@@ -527,16 +503,15 @@ class TestEndToEndPipeline:
                 "rejected": "No.",
             },
             {
-                "messages": [{"role": "user", "content": "This is a much longer question with more tokens?"}],
+                "messages": [
+                    {"role": "user", "content": "This is a much longer question with more tokens?"}
+                ],
                 "chosen": "This is a detailed answer with multiple sentences and lots of tokens.",
                 "rejected": "Brief.",
             },
         ]
 
-        tokenized = [
-            tokenize_preference_example(tokenizer, ex, max_len=256)
-            for ex in raw_examples
-        ]
+        tokenized = [tokenize_preference_example(tokenizer, ex, max_len=256) for ex in raw_examples]
 
         batch = collate_preference_batch(tokenizer, tokenized)
 

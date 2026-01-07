@@ -4,9 +4,10 @@ Custom PyTorch Optimizer Implementations
 Implements: SGD with Momentum, RMSProp, Adam, AdamW, Muon
 """
 
+from collections.abc import Callable, Iterable
+
 import torch
 from torch.optim import Optimizer
-from typing import Iterable, Callable
 
 
 class SGDMomentum(Optimizer):
@@ -171,9 +172,7 @@ class RMSProp(Optimizer):
                 update = grad / (v.sqrt() + eps)
 
                 if momentum > 0:
-                    state["momentum_buffer"] = (
-                        momentum * state["momentum_buffer"] + update
-                    )
+                    state["momentum_buffer"] = momentum * state["momentum_buffer"] + update
                     p.add_(state["momentum_buffer"], alpha=-lr)
                 else:
                     p.add_(update, alpha=-lr)
@@ -435,7 +434,7 @@ class Muon(Optimizer):
             Orthogonalized matrix with same shape as G
         """
         assert G.ndim >= 2
-        a, b, c = (3.4445, -4.7750,  2.0315)
+        a, b, c = (3.4445, -4.7750, 2.0315)
         X = G.bfloat16()
         if G.size(-2) > G.size(-1):
             X = X.mT
@@ -459,11 +458,11 @@ class Muon(Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
-            lr = group['lr']
-            beta = group['momentum']
-            weight_decay = group['weight_decay']
+            lr = group["lr"]
+            beta = group["momentum"]
+            weight_decay = group["weight_decay"]
 
-            for p in group['params']:
+            for p in group["params"]:
                 if p.grad is None:
                     continue
 
@@ -473,13 +472,13 @@ class Muon(Optimizer):
                 if len(state) == 0:
                     state["momentum_buffer"] = torch.zeros_like(p)
 
-                momentum = state['momentum_buffer']
+                momentum = state["momentum_buffer"]
                 momentum.lerp_(grad, 1 - beta)
-                update = grad.lerp_(momentum, beta) if group['nesterov'] else momentum
+                update = grad.lerp_(momentum, beta) if group["nesterov"] else momentum
 
                 if p.ndim >= 2:
-                    update = self._newton_schulz(update, steps=group['ns_steps']).to(p.dtype)
-                    
+                    update = self._newton_schulz(update, steps=group["ns_steps"]).to(p.dtype)
+
                 p.add_(update + weight_decay * p, alpha=-lr)
 
         return loss

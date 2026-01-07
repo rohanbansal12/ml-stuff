@@ -1,15 +1,13 @@
+import argparse
+import glob
 import os
 import re
-import glob
-import argparse
 from dataclasses import dataclass
-from typing import Optional, Dict, List
-import pandas as pd
 
 import matplotlib.pyplot as plt
-
-from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+import pandas as pd
 import seaborn as sns
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 sns.set_theme(
     style="whitegrid",
@@ -24,13 +22,15 @@ sns.set_theme(
 
 RUN_RE = re.compile(r"bert_(head|full|lora)_lr([0-9.eE+-]+)(?:_r=([0-9]+))?")
 
-def find_event_file(run_dir: str) -> Optional[str]:
+
+def find_event_file(run_dir: str) -> str | None:
     # Common TB event file glob
     files = sorted(glob.glob(os.path.join(run_dir, "events.out.tfevents.*")))
     if not files:
         # fall back: any file containing tfevents
         files = sorted(glob.glob(os.path.join(run_dir, "*tfevents*")))
     return files[0] if files else None
+
 
 def parse_run_name(run_dir_name: str):
     """
@@ -48,7 +48,8 @@ def parse_run_name(run_dir_name: str):
     rank = int(r) if r is not None else None
     return run_type, lr, rank
 
-def load_scalars(event_path: str) -> Dict[str, List]:
+
+def load_scalars(event_path: str) -> dict[str, list]:
     """
     Returns dict tag -> list of scalar events (each has .step, .value)
     """
@@ -72,32 +73,35 @@ class RunSummary:
     run_name: str
     run_type: str
     lr: float
-    rank: Optional[int]
-    trainable_params: Optional[float]
-    total_params: Optional[float]
-    best_val_acc: Optional[float]
-    best_train_acc: Optional[float]
-    best_val_loss: Optional[float]
-    best_val_step: Optional[int]
+    rank: int | None
+    trainable_params: float | None
+    total_params: float | None
+    best_val_acc: float | None
+    best_train_acc: float | None
+    best_val_loss: float | None
+    best_val_step: int | None
 
 
-def scalar_last_value(events) -> Optional[float]:
+def scalar_last_value(events) -> float | None:
     if not events:
         return None
     return float(events[-1].value)
 
-def scalar_first_value(events) -> Optional[float]:
+
+def scalar_first_value(events) -> float | None:
     if not events:
         return None
     return float(events[0].value)
 
-def scalar_best_max(events) -> (Optional[float], Optional[int]):
+
+def scalar_best_max(events) -> (float | None, int | None):
     if not events:
         return None, None
     best = max(events, key=lambda e: e.value)
     return float(best.value), int(best.step)
 
-def scalar_best_min(events) -> (Optional[float], Optional[int]):
+
+def scalar_best_min(events) -> (float | None, int | None):
     if not events:
         return None, None
     best = min(events, key=lambda e: e.value)
@@ -108,9 +112,10 @@ def scalar_best_min(events) -> (Optional[float], Optional[int]):
 # Main extraction
 # -------------------------
 
-def collect_runs(root_dir: str) -> List[RunSummary]:
+
+def collect_runs(root_dir: str) -> list[RunSummary]:
     run_dirs = sorted([d for d in glob.glob(os.path.join(root_dir, "*")) if os.path.isdir(d)])
-    summaries: List[RunSummary] = []
+    summaries: list[RunSummary] = []
 
     for rd in run_dirs:
         name = os.path.basename(rd)
@@ -160,12 +165,15 @@ def collect_runs(root_dir: str) -> List[RunSummary]:
 # Plotting
 # -------------------------
 
+
 def ensure_outdir(out_dir: str):
     os.makedirs(out_dir, exist_ok=True)
 
+
 def plot_best_val_acc_vs_rank(runs, out_dir):
     lora = [
-        r for r in runs
+        r
+        for r in runs
         if r.run_type == "lora" and r.rank is not None and r.best_val_acc is not None
     ]
     lora.sort(key=lambda x: x.rank)
@@ -198,11 +206,9 @@ def plot_best_val_acc_vs_rank(runs, out_dir):
     plt.close()
     print(f"[OK] Wrote {path}")
 
+
 def plot_best_val_acc_vs_trainable_params(runs, out_dir):
-    rows = [
-        r for r in runs
-        if r.best_val_acc is not None and r.trainable_params is not None
-    ]
+    rows = [r for r in runs if r.best_val_acc is not None and r.trainable_params is not None]
 
     if not rows:
         print("[WARN] No runs found for param plot")
@@ -248,6 +254,7 @@ def plot_best_val_acc_vs_trainable_params(runs, out_dir):
     plt.close()
     print(f"[OK] Wrote {path}")
 
+
 def plot_training_curves_selected(
     runs,
     root_dir,
@@ -286,19 +293,18 @@ def plot_training_curves_selected(
         scalars = load_scalars(event_path)
         ev = scalars.get("Acc/val", [])
         for e in ev:
-            curve_rows.append({
-                "step": e.step,
-                "val_acc": e.value,
-                "label": (
-                    s.run_type if s.run_type != "lora"
-                    else f"LoRA r={s.rank}"
-                ),
-            })
+            curve_rows.append(
+                {
+                    "step": e.step,
+                    "val_acc": e.value,
+                    "label": (s.run_type if s.run_type != "lora" else f"LoRA r={s.rank}"),
+                }
+            )
 
     if not curve_rows:
         print("[WARN] No scalar data for curve plot")
         return
-    
+
     curve_rows = pd.DataFrame(curve_rows)
 
     plt.figure(figsize=(10, 6))
@@ -324,20 +330,31 @@ def plot_training_curves_selected(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root_dir", type=str, default="/workspace/ml-stuff/runs/lora",
-                        help="Parent directory containing run subdirectories.")
-    parser.add_argument("--out_dir", type=str, default="/workspace/ml-stuff/LoRA/plots",
-                        help="Directory to write summary plots.")
-    parser.add_argument("--no_curves", action="store_true",
-                        help="Disable curve plot and only write summary plots.")
+    parser.add_argument(
+        "--root_dir",
+        type=str,
+        default="/workspace/ml-stuff/runs/lora",
+        help="Parent directory containing run subdirectories.",
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default="/workspace/ml-stuff/LoRA/plots",
+        help="Directory to write summary plots.",
+    )
+    parser.add_argument(
+        "--no_curves", action="store_true", help="Disable curve plot and only write summary plots."
+    )
     args = parser.parse_args()
 
     ensure_outdir(args.out_dir)
 
     runs = collect_runs(args.root_dir)
     if not runs:
-        raise RuntimeError(f"No runnable TB runs found under {args.root_dir}. "
-                           f"Check naming convention and event files.")
+        raise RuntimeError(
+            f"No runnable TB runs found under {args.root_dir}. "
+            f"Check naming convention and event files."
+        )
 
     # Print a quick table
     print("\n=== Run summaries ===")
@@ -355,6 +372,7 @@ def main():
 
     if not args.no_curves:
         plot_training_curves_selected(runs, args.root_dir, args.out_dir)
+
 
 if __name__ == "__main__":
     main()

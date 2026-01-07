@@ -1,14 +1,12 @@
+import argparse
+import os
+from datetime import datetime
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 from model import resnet18, resnet50
-from utils import get_dataloaders, train_one_epoch, evaluate
-import argparse
 from torch.utils.tensorboard import SummaryWriter
-from datetime import datetime
-import os
+from utils import evaluate, get_dataloaders, train_one_epoch
 
 
 # -----------------------
@@ -16,11 +14,9 @@ import os
 # -----------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="resnet18",
-                        choices=["resnet18", "resnet50"])
+    parser.add_argument("--model", type=str, default="resnet18", choices=["resnet18", "resnet50"])
     parser.add_argument("--no-normalize", action="store_false", dest="normalize")
-    parser.add_argument("--run-name", type=str, default=None,
-                        help="Name to show in TensorBoard")
+    parser.add_argument("--run-name", type=str, default=None, help="Name to show in TensorBoard")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=50)
@@ -54,10 +50,7 @@ def main():
     # -----------------------
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(
-        model.parameters(),
-        lr=args.lr, 
-        momentum=args.momentum, 
-        weight_decay=args.weight_decay
+        model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay
     )
     # scheduler = torch.optim.lr_scheduler.MultiStepLR(
     #     optimizer, milestones=[30, 45], gamma=0.1
@@ -73,15 +66,17 @@ def main():
 
     best_acc = 0.0
     for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch)
+        train_loss, train_acc = train_one_epoch(
+            model, train_loader, optimizer, criterion, device, epoch
+        )
         val_loss, val_acc = evaluate(model, test_loader, criterion, device)
         # scheduler.step()
 
         # log scalars
         writer.add_scalar("Loss/train", train_loss, epoch)
-        writer.add_scalar("Loss/val",   val_loss,   epoch)
-        writer.add_scalar("Acc/train",  train_acc,  epoch)
-        writer.add_scalar("Acc/val",    val_acc,    epoch)
+        writer.add_scalar("Loss/val", val_loss, epoch)
+        writer.add_scalar("Acc/train", train_acc, epoch)
+        writer.add_scalar("Acc/val", val_acc, epoch)
 
         print(
             f"[{run_name}] Epoch {epoch:03d}: "
@@ -95,6 +90,7 @@ def main():
         #     print(f"  🔹 New best val acc: {best_acc:.4f}")
 
     writer.close()
+
 
 if __name__ == "__main__":
     main()

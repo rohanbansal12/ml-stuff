@@ -1,17 +1,16 @@
+from dataclasses import dataclass
+
 import torch
 import torch.nn.functional as F
+from datasets import load_dataset
 from torch import Tensor
+from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
     PreTrainedTokenizer,
 )
-from datasets import load_dataset
-from dataclasses import dataclass
-from typing import Optional
-from tqdm import tqdm
-
 
 # -----------------------------------------------------------------------------
 # Model Loading
@@ -20,7 +19,7 @@ from tqdm import tqdm
 
 def load_model(
     model_name: str = "Qwen/Qwen2.5-1.5B",
-    device: Optional[str] = None,
+    device: str | None = None,
     dtype: torch.dtype = torch.float16,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
     """
@@ -84,13 +83,13 @@ class HellaSwagSample:
     label: int  # Index of correct ending (0-3)
 
     # Pre-tokenized versions (filled by load_hellaswag)
-    context_tokens: Optional[list[int]] = None
-    ending_tokens: Optional[list[list[int]]] = None
+    context_tokens: list[int] | None = None
+    ending_tokens: list[list[int]] | None = None
 
 
 def load_hellaswag(
     tokenizer: PreTrainedTokenizer,
-    n_samples: Optional[int] = None,
+    n_samples: int | None = None,
     split: str = "validation",
 ) -> list[HellaSwagSample]:
     """
@@ -128,8 +127,7 @@ def load_hellaswag(
         # Pre-tokenize for efficiency
         sample.context_tokens = tokenizer.encode(context, add_special_tokens=False)
         sample.ending_tokens = [
-            tokenizer.encode(" " + ending, add_special_tokens=False)
-            for ending in item["endings"]
+            tokenizer.encode(" " + ending, add_special_tokens=False) for ending in item["endings"]
         ]
 
         samples.append(sample)
@@ -184,16 +182,12 @@ def evaluate_hellaswag(
 
                 # Logits at position i predict token i+1
                 # So logits[ending_start-1:ending_start-1+ending_len] predict ending tokens
-                relevant_logits = logits[
-                    0, ending_start - 1 : ending_start - 1 + ending_len
-                ]
+                relevant_logits = logits[0, ending_start - 1 : ending_start - 1 + ending_len]
                 target_tokens = torch.tensor(ending_tokens, device=device)
 
                 # Log softmax and gather target token probs
                 log_probs = F.log_softmax(relevant_logits, dim=-1)
-                token_log_probs = log_probs.gather(
-                    1, target_tokens.unsqueeze(1)
-                ).squeeze(1)
+                token_log_probs = log_probs.gather(1, target_tokens.unsqueeze(1)).squeeze(1)
 
                 # Average log prob (length-normalized)
                 avg_log_prob = token_log_probs.mean().item()
@@ -282,7 +276,7 @@ def evaluate_perplexity(
     tokenizer: PreTrainedTokenizer,
     wikitext: WikiTextData,
     stride: int = 512,
-    max_length: Optional[int] = None,
+    max_length: int | None = None,
 ) -> dict:
     """
     Compute perplexity on WikiText using sliding window.
@@ -361,8 +355,8 @@ def evaluate_perplexity(
 def evaluate_model(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
-    hellaswag_samples: Optional[list[HellaSwagSample]] = None,
-    wikitext_data: Optional[WikiTextData] = None,
+    hellaswag_samples: list[HellaSwagSample] | None = None,
+    wikitext_data: WikiTextData | None = None,
     hellaswag_n: int = 500,
     wikitext_tokens: int = 4096,
 ) -> dict:

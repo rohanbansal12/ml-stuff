@@ -1,29 +1,29 @@
+import argparse
+import math
+import os
+import sys
+import time
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from torch.utils.tensorboard import SummaryWriter
+from datasets import load_dataset
 from torch.profiler import (
-    profile,
     ProfilerActivity,
+    profile,
     schedule,
     tensorboard_trace_handler,
 )
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.tensorboard import SummaryWriter
 from transformers import GPT2Tokenizer
-from datasets import load_dataset
-import argparse
-from datetime import datetime
-import os
-import math
-import time
-from dataclasses import dataclass, asdict
-from typing import Optional
-import sys
-from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from gpt.model import GPT, GPTConfig, GenerationEngine
 from gpt.diagnostics import TrainingDiagnostics, detect_anomalies
+from gpt.model import GPT, GenerationEngine, GPTConfig
 
 
 @dataclass
@@ -55,9 +55,7 @@ class ProfilingMetrics:
     def update_memory(self):
         if torch.cuda.is_available():
             self.peak_memory_mb = torch.cuda.max_memory_reserved() / 1024 / 1024
-            self.peak_memory_allocated_mb = (
-                torch.cuda.max_memory_allocated() / 1024 / 1024
-            )
+            self.peak_memory_allocated_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
 
 
 class Timer:
@@ -149,9 +147,7 @@ def load_validation_data(tokenizer, max_stories=5000):
 
 
 @torch.no_grad()
-def sample_text(
-    model, tokenizer, device, prompts, max_new_tokens=100, temperature=0.8, top_k=50
-):
+def sample_text(model, tokenizer, device, prompts, max_new_tokens=100, temperature=0.8, top_k=50):
     """
     Generate text from multiple prompts using the GenerationEngine.
 
@@ -256,7 +252,7 @@ def sample_text_with_streaming(
 def log_generations(writer, generations, prompts, global_step):
     """Log generations to tensorboard."""
     text = ""
-    for prompt, gen in zip(prompts, generations):
+    for prompt, gen in zip(prompts, generations, strict=False):
         text += f"**Prompt:** {prompt}\n\n**Generation:**\n{gen}\n\n---\n\n"
     writer.add_text("generations", text, global_step)
 
@@ -292,9 +288,7 @@ def benchmark_generation_methods(
     for _ in range(num_runs):
         for prompt_tokens in prompt_tokens_list:
             input_ids = torch.tensor([prompt_tokens], device=device)
-            _ = model.generate(
-                input_ids, max_new_tokens=max_new_tokens, temperature=0.8
-            )
+            _ = model.generate(input_ids, max_new_tokens=max_new_tokens, temperature=0.8)
 
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     elapsed = time.perf_counter() - start
@@ -307,9 +301,7 @@ def benchmark_generation_methods(
     for _ in range(num_runs):
         engine = GenerationEngine(model, max_batch=num_prompts, device=device)
         for prompt_tokens in prompt_tokens_list:
-            engine.add_request(
-                prompt_tokens, max_new_tokens=max_new_tokens, temperature=0.8
-            )
+            engine.add_request(prompt_tokens, max_new_tokens=max_new_tokens, temperature=0.8)
         for _ in engine.run():
             pass
 
@@ -339,10 +331,10 @@ def train_one_epoch(
     writer,
     epoch,
     log_interval=100,
-    metrics: Optional[ProfilingMetrics] = None,
+    metrics: ProfilingMetrics | None = None,
     use_amp: bool = False,
     grad_accum_steps: int = 1,
-    diagnostics: Optional[TrainingDiagnostics] = None,
+    diagnostics: TrainingDiagnostics | None = None,
     diagnostics_interval: int = 500,
 ):
     """
@@ -377,9 +369,7 @@ def train_one_epoch(
 
         # Forward pass (with optional bfloat16 autocast)
         with timer:
-            with torch.amp.autocast(
-                device_type=device.type, dtype=torch.bfloat16, enabled=use_amp
-            ):
+            with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
                 logits = model(x)
                 # Scale loss by accumulation steps for correct gradient magnitude
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
@@ -456,31 +446,19 @@ def train_one_epoch(
             # Loss metrics
             writer.add_scalar("train/loss", loss.item(), optimizer_step)
             writer.add_scalar("train/avg_loss", avg_loss, optimizer_step)
-            writer.add_scalar(
-                "train/perplexity", math.exp(min(loss.item(), 20)), optimizer_step
-            )
+            writer.add_scalar("train/perplexity", math.exp(min(loss.item(), 20)), optimizer_step)
             writer.add_scalar("train/grad_norm", grad_norm, optimizer_step)
             writer.add_scalar("train/learning_rate", current_lr, optimizer_step)
 
             # Throughput metrics
-            writer.add_scalar(
-                "perf/tokens_per_sec", metrics.ema_tokens_per_sec, optimizer_step
-            )
-            writer.add_scalar(
-                "perf/step_time_ms", metrics.ema_step_time_ms, optimizer_step
-            )
+            writer.add_scalar("perf/tokens_per_sec", metrics.ema_tokens_per_sec, optimizer_step)
+            writer.add_scalar("perf/step_time_ms", metrics.ema_step_time_ms, optimizer_step)
             writer.add_scalar("perf/forward_ms", metrics.ema_forward_ms, optimizer_step)
-            writer.add_scalar(
-                "perf/backward_ms", metrics.ema_backward_ms, optimizer_step
-            )
-            writer.add_scalar(
-                "perf/optimizer_ms", metrics.ema_optimizer_ms, optimizer_step
-            )
+            writer.add_scalar("perf/backward_ms", metrics.ema_backward_ms, optimizer_step)
+            writer.add_scalar("perf/optimizer_ms", metrics.ema_optimizer_ms, optimizer_step)
 
             # Memory metrics
-            writer.add_scalar(
-                "memory/peak_reserved_mb", metrics.peak_memory_mb, optimizer_step
-            )
+            writer.add_scalar("memory/peak_reserved_mb", metrics.peak_memory_mb, optimizer_step)
             writer.add_scalar(
                 "memory/peak_allocated_mb",
                 metrics.peak_memory_allocated_mb,
@@ -489,9 +467,7 @@ def train_one_epoch(
 
             if torch.cuda.is_available():
                 current_mem = torch.cuda.memory_allocated() / 1024 / 1024
-                writer.add_scalar(
-                    "memory/current_allocated_mb", current_mem, optimizer_step
-                )
+                writer.add_scalar("memory/current_allocated_mb", current_mem, optimizer_step)
 
             # Detailed diagnostics (less frequent)
             if diagnostics is not None and optimizer_step % diagnostics_interval == 0:
@@ -514,9 +490,7 @@ def evaluate(model, val_loader, device, use_amp: bool = False):
 
     for x, y in val_loader:
         x, y = x.to(device), y.to(device)
-        with torch.amp.autocast(
-            device_type=device.type, dtype=torch.bfloat16, enabled=use_amp
-        ):
+        with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
             logits = model(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
         total_loss += loss.item() * y.numel()
@@ -530,9 +504,7 @@ def evaluate(model, val_loader, device, use_amp: bool = False):
 # =============================================================================
 
 
-def get_cosine_schedule_with_warmup(
-    optimizer, warmup_steps, total_steps, min_lr_ratio=0.1
-):
+def get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps, min_lr_ratio=0.1):
     """
     Cosine decay with linear warmup.
 
@@ -547,16 +519,12 @@ def get_cosine_schedule_with_warmup(
         if step < warmup_steps:
             return step / warmup_steps
         progress = (step - warmup_steps) / (total_steps - warmup_steps)
-        return min_lr_ratio + (1 - min_lr_ratio) * 0.5 * (
-            1 + math.cos(math.pi * progress)
-        )
+        return min_lr_ratio + (1 - min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def get_linear_schedule_with_warmup(
-    optimizer, warmup_steps, total_steps, min_lr_ratio=0.1
-):
+def get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps, min_lr_ratio=0.1):
     """
     Linear decay with linear warmup.
 
@@ -576,9 +544,7 @@ def get_linear_schedule_with_warmup(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def get_wsd_schedule(
-    optimizer, warmup_steps, total_steps, stable_ratio=0.8, min_lr_ratio=0.1
-):
+def get_wsd_schedule(optimizer, warmup_steps, total_steps, stable_ratio=0.8, min_lr_ratio=0.1):
     """
     Warmup-Stable-Decay (WSD) schedule.
 
@@ -610,16 +576,12 @@ def get_wsd_schedule(
 
         # Decay phase
         decay_progress = (step_after_warmup - stable_steps) / decay_steps
-        return min_lr_ratio + (1 - min_lr_ratio) * 0.5 * (
-            1 + math.cos(math.pi * decay_progress)
-        )
+        return min_lr_ratio + (1 - min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * decay_progress))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def get_inverse_sqrt_schedule(
-    optimizer, warmup_steps, total_steps=None, min_lr_ratio=0.1
-):
+def get_inverse_sqrt_schedule(optimizer, warmup_steps, total_steps=None, min_lr_ratio=0.1):
     """
     Inverse square root schedule with linear warmup.
 
@@ -644,9 +606,7 @@ def get_inverse_sqrt_schedule(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def get_constant_schedule_with_warmup(
-    optimizer, warmup_steps, total_steps=None, min_lr_ratio=None
-):
+def get_constant_schedule_with_warmup(optimizer, warmup_steps, total_steps=None, min_lr_ratio=None):
     """
     Constant LR with linear warmup.
 
@@ -698,9 +658,7 @@ def get_scheduler(
     }
 
     if name not in schedulers:
-        raise ValueError(
-            f"Unknown scheduler: {name}. Choose from: {list(schedulers.keys())}"
-        )
+        raise ValueError(f"Unknown scheduler: {name}. Choose from: {list(schedulers.keys())}")
 
     return schedulers[name](
         optimizer=optimizer,
@@ -711,9 +669,7 @@ def get_scheduler(
     )
 
 
-def run_profiler(
-    model, train_loader, optimizer, scheduler, device, log_dir, num_steps=20
-):
+def run_profiler(model, train_loader, optimizer, scheduler, device, log_dir, num_steps=20):
     """
     Run detailed PyTorch profiler for a few steps.
     Exports Chrome trace and TensorBoard plugin data.
@@ -774,9 +730,7 @@ def run_profiler(
     # Export memory timeline if available
     if torch.cuda.is_available():
         try:
-            prof.export_memory_timeline(
-                os.path.join(profile_dir, "memory_timeline.html")
-            )
+            prof.export_memory_timeline(os.path.join(profile_dir, "memory_timeline.html"))
             print(f"Memory timeline exported to: {profile_dir}/memory_timeline.html")
         except Exception as e:
             print(f"Could not export memory timeline: {e}")
@@ -852,9 +806,7 @@ def main():
 
     # Logging
     parser.add_argument("--log_interval", type=int, default=100)
-    parser.add_argument(
-        "--sample_interval", type=int, default=1, help="Sample every N epochs"
-    )
+    parser.add_argument("--sample_interval", type=int, default=1, help="Sample every N epochs")
     parser.add_argument("--log_dir", type=str, default="/workspace/ml-stuff/GPT/runs")
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--save_dir", type=str, default="/workspace/checkpoints")
@@ -877,9 +829,7 @@ def main():
         action="store_true",
         help="Run detailed profiler for first N steps then exit",
     )
-    parser.add_argument(
-        "--profile_steps", type=int, default=20, help="Number of steps to profile"
-    )
+    parser.add_argument("--profile_steps", type=int, default=20, help="Number of steps to profile")
     parser.add_argument(
         "--benchmark_generation",
         action="store_true",
@@ -1046,9 +996,7 @@ def main():
         if not torch.cuda.is_available():
             print("WARNING: AMP requested but CUDA not available, using fp32")
         elif not torch.cuda.is_bf16_supported():
-            print(
-                "WARNING: AMP requested but bfloat16 not supported on this GPU, using fp32"
-            )
+            print("WARNING: AMP requested but bfloat16 not supported on this GPU, using fp32")
         else:
             use_amp = True
             print("Mixed precision enabled (bfloat16)")
@@ -1125,7 +1073,7 @@ def main():
             log_generations(writer, generations, sample_prompts, global_step)
 
             print("\nSample generations:")
-            for prompt, gen in zip(sample_prompts, generations):
+            for prompt, gen in zip(sample_prompts, generations, strict=False):
                 print(f"  [{prompt}...] -> {gen[:150]}...")
 
         # Save checkpoint

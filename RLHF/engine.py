@@ -1,14 +1,15 @@
+import random
+from dataclasses import dataclass
+from typing import Any
+
+import accelerate
+import datasets
+import numpy as np
+import peft
 import torch
 import torch.nn.functional as F
 import transformers
-import datasets
 import trl
-import accelerate
-import peft
-import random
-import numpy as np
-from dataclasses import dataclass
-from typing import Any, List, Dict, Tuple
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -122,9 +123,7 @@ def tokenizer_test(tok):
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Say hello in one sentence."},
     ]
-    chat_str = tok.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    chat_str = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     print("=" * 80)
     print("RAW CHAT TEMPLATE STRING")
     print("=" * 80)
@@ -171,9 +170,7 @@ def load_model(model_name, dtype, device):
     Returns:
         transformers.PreTrainedModel: Model in evaluation mode.
     """
-    model = transformers.AutoModelForCausalLM.from_pretrained(
-        model_name, dtype=dtype
-    ).to(device)
+    model = transformers.AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype).to(device)
     model.eval()
 
     return model
@@ -197,9 +194,7 @@ def model_test(model, tokenizer):
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Say hello in one sentence."},
     ]
-    prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     enc = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
     enc = {k: v.to(model.device) for k, v in enc.items()}
 
@@ -355,7 +350,7 @@ def generate_test(model, tokenizer):
     assert not torch.equal(y1.completion_ids, y2.completion_ids)
 
 
-def completion_logprobs(model, input_ids, attention_mask, prompt_lens, require_grad = False):
+def completion_logprobs(model, input_ids, attention_mask, prompt_lens, require_grad=False):
     """Compute log probabilities for completion tokens in batched sequences.
 
     Runs a forward pass and computes per-token log probabilities for the
@@ -393,9 +388,7 @@ def completion_logprobs(model, input_ids, attention_mask, prompt_lens, require_g
     attn = attention_mask[:, 1:]  # [B, T-1]
 
     logp_all = F.log_softmax(logits.float(), dim=-1)  # [B, T-1, V]
-    token_logp = logp_all.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(
-        -1
-    )  # [B, T-1]
+    token_logp = logp_all.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)  # [B, T-1]
 
     real_index_input = attention_mask.cumsum(dim=1) - 1  # [B, T]
     # completion tokens are those with real_index >= prompt_len (in input space)
@@ -455,9 +448,7 @@ def _find_single_token_id(tokenizer, candidates=None):
         if len(ids) == 1:
             return ids[0], s
 
-    raise RuntimeError(
-        "Could not find a single-token candidate. Try expanding the candidate list."
-    )
+    raise RuntimeError("Could not find a single-token candidate. Try expanding the candidate list.")
 
 
 def _build_prompt(tokenizer, messages):
@@ -561,9 +552,7 @@ def test_completion_logprobs_sanity(
     one_tok_id, one_tok_str = _find_single_token_id(tokenizer)
 
     completion_ids_1d = torch.tensor([one_tok_id], device=device, dtype=torch.long)
-    input_ids2 = torch.cat([prompt_ids_1d, completion_ids_1d], dim=0).unsqueeze(
-        0
-    )  # [1, T+1]
+    input_ids2 = torch.cat([prompt_ids_1d, completion_ids_1d], dim=0).unsqueeze(0)  # [1, T+1]
     attention_mask2 = torch.ones_like(input_ids2, device=device)
     prompt_lens2 = torch.tensor([prompt_len], device=device, dtype=torch.long)
 
@@ -578,9 +567,9 @@ def test_completion_logprobs_sanity(
         )
         print("[Check 2] Selected completion tokens:", selected2)
 
-    assert selected2 == 1, (
-        f"Check 2 failed: expected exactly 1 completion token selected, got {selected2}."
-    )
+    assert (
+        selected2 == 1
+    ), f"Check 2 failed: expected exactly 1 completion token selected, got {selected2}."
 
     # Identify the position in token_logp space that was selected
     # token_logp is aligned to labels = input_ids[:, 1:]  => length (T_total - 1)
@@ -705,9 +694,7 @@ class RLHFEngine:
         self.tokenizer.padding_side = "left"
         self.tokenizer.truncation_side = "left"
 
-    def build_prompt(
-        self, messages: List[Dict[str, str]]
-    ) -> Tuple[str, torch.Tensor, int]:
+    def build_prompt(self, messages: list[dict[str, str]]) -> tuple[str, torch.Tensor, int]:
         """Build and tokenize a chat prompt from messages.
 
         Args:
@@ -764,7 +751,7 @@ class RLHFEngine:
 
     def logprob_of_completion(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         completion_ids: torch.Tensor,  # 1D completion token ids
     ) -> float:
         """Compute log probability of a completion given messages.
@@ -791,9 +778,7 @@ class RLHFEngine:
         # Make batch
         input_ids = full_ids_1d.unsqueeze(0)  # [1, T]
         attention_mask = torch.ones_like(input_ids, device=self.model.device)
-        prompt_lens = torch.tensor(
-            [prompt_len], device=self.model.device, dtype=torch.long
-        )
+        prompt_lens = torch.tensor([prompt_len], device=self.model.device, dtype=torch.long)
 
         sum_logp = self._completion_logprobs_from_full_sequence(
             input_ids, attention_mask, prompt_lens
@@ -802,10 +787,10 @@ class RLHFEngine:
 
     def score_pair(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         chosen_ids: torch.Tensor,
         rejected_ids: torch.Tensor,
-    ) -> Tuple[float, float]:
+    ) -> tuple[float, float]:
         """Score a preference pair (chosen vs rejected completions).
 
         Args:

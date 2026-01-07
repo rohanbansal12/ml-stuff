@@ -2,8 +2,8 @@
 Data loading utilities for CIFAR-10.
 """
 
-from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
 
 
 def get_cifar_data(data_dir: str = "./data"):

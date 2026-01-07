@@ -1,14 +1,15 @@
-from dataclasses import dataclass
-import torch
-import numpy as np
 import argparse
 import random
 import string
+from dataclasses import dataclass
 
-from baseline import load_logits, build_model_and_tokenizer
+import numpy as np
+import torch
+from baseline import build_model_and_tokenizer, load_logits
 
 MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 @dataclass
 class RoutingBaseline:
@@ -91,12 +92,10 @@ class RoutingBaseline:
         """
         num_layers, total_tokens, num_experts = new_probs.shape
 
-        assert num_layers == self.num_layers, (
-            f"Layer mismatch: {num_layers} vs {self.num_layers}"
-        )
-        assert num_experts == self.num_experts, (
-            f"Expert mismatch: {num_experts} vs {self.num_experts}"
-        )
+        assert num_layers == self.num_layers, f"Layer mismatch: {num_layers} vs {self.num_layers}"
+        assert (
+            num_experts == self.num_experts
+        ), f"Expert mismatch: {num_experts} vs {self.num_experts}"
 
         results = {}
 
@@ -111,9 +110,7 @@ class RoutingBaseline:
         new_entropy_std = norm_entropy.std(dim=1)
 
         # Z-scores relative to baseline
-        entropy_zscore = (new_entropy_mean - self.entropy_mean) / (
-            self.entropy_std + 1e-8
-        )
+        entropy_zscore = (new_entropy_mean - self.entropy_mean) / (self.entropy_std + 1e-8)
 
         # Fraction of tokens outside baseline percentiles
         below_p05 = (norm_entropy < self.entropy_p05.unsqueeze(1)).float().mean(dim=1)
@@ -164,9 +161,9 @@ class RoutingBaseline:
                 sorted_util = util_tensor[layer].sort().values
                 n = len(sorted_util)
                 index = torch.arange(1, n + 1, dtype=torch.float)
-                gini[layer] = (
-                    2 * (index @ sorted_util) - (n + 1) * sorted_util.sum()
-                ) / (n * sorted_util.sum() + 1e-8)
+                gini[layer] = (2 * (index @ sorted_util) - (n + 1) * sorted_util.sum()) / (
+                    n * sorted_util.sum() + 1e-8
+                )
             return gini
 
         new_gini = compute_gini(new_util)
@@ -213,9 +210,7 @@ class RoutingBaseline:
         new_pw_mean = primary_weight.mean(dim=1)
         new_pw_std = primary_weight.std(dim=1)
 
-        pw_zscore = (new_pw_mean - self.primary_weight_mean) / (
-            self.primary_weight_std + 1e-8
-        )
+        pw_zscore = (new_pw_mean - self.primary_weight_mean) / (self.primary_weight_std + 1e-8)
 
         results["primary_weight"] = {
             "mean": new_pw_mean,
@@ -273,9 +268,7 @@ class RoutingBaseline:
             "total_tokens": total_tokens,
             "entropy_mean_change": (new_entropy_mean - self.entropy_mean).mean().item(),
             "utilization_kl_mean": util_kl.mean().item(),
-            "primary_weight_change": (new_pw_mean - self.primary_weight_mean)
-            .mean()
-            .item(),
+            "primary_weight_change": (new_pw_mean - self.primary_weight_mean).mean().item(),
             "max_load_mean": new_max_load.mean().item(),
             "effective_experts_mean": new_effective.mean().item(),
         }
@@ -326,9 +319,7 @@ def print_routing_comparison(results: dict, baseline: RoutingBaseline):
     )
 
     if results["collapse"]["num_collapsed"] > 0:
-        collapsed_idx = (
-            results["collapse"]["collapsed_layers"].nonzero().squeeze(-1).tolist()
-        )
+        collapsed_idx = results["collapse"]["collapsed_layers"].nonzero().squeeze(-1).tolist()
         if isinstance(collapsed_idx, int):
             collapsed_idx = [collapsed_idx]
         print(f"  Collapsed layer indices: {collapsed_idx}")
@@ -338,68 +329,56 @@ def print_routing_comparison(results: dict, baseline: RoutingBaseline):
 
     # Primary weight
     print("\n--- Routing Decisiveness ---")
-    print(
-        f"  Primary weight change: {results['summary']['primary_weight_change']:+.4f}"
-    )
+    print(f"  Primary weight change: {results['summary']['primary_weight_change']:+.4f}")
 
     print("\n" + "=" * 60)
 
 
 def generate_ood_inputs(tokenizer, num_samples=100, seq_len=256) -> dict:
     """Generate various OOD input types."""
-    
+
     inputs = {}
-    
+
     # 1. Repetition-based
-    inputs['single_token_repeat'] = [
-        tokenizer.encode("the " * seq_len)[:seq_len]
-        for _ in range(num_samples)
+    inputs["single_token_repeat"] = [
+        tokenizer.encode("the " * seq_len)[:seq_len] for _ in range(num_samples)
     ]
-    inputs['phrase_repeat'] = [
+    inputs["phrase_repeat"] = [
         tokenizer.encode("the quick brown fox " * (seq_len // 5))[:seq_len]
         for _ in range(num_samples)
     ]
-    
+
     # 2. Random/noise
-    inputs['random_tokens'] = [
-        torch.randint(0, tokenizer.vocab_size, (seq_len,)).tolist()
+    inputs["random_tokens"] = [
+        torch.randint(0, tokenizer.vocab_size, (seq_len,)).tolist() for _ in range(num_samples)
+    ]
+    inputs["random_ascii"] = [
+        tokenizer.encode("".join(random.choices(string.printable, k=seq_len * 4)))[:seq_len]
         for _ in range(num_samples)
     ]
-    inputs['random_ascii'] = [
-        tokenizer.encode(''.join(random.choices(string.printable, k=seq_len*4)))[:seq_len]
-        for _ in range(num_samples)
-    ]
-    
+
     # 3. Adversarial-ish
-    inputs['all_punctuation'] = [
-        tokenizer.encode(".,!?;:" * seq_len)[:seq_len]
-        for _ in range(num_samples)
+    inputs["all_punctuation"] = [
+        tokenizer.encode(".,!?;:" * seq_len)[:seq_len] for _ in range(num_samples)
     ]
-    inputs['all_numbers'] = [
-        tokenizer.encode("0123456789 " * seq_len)[:seq_len]
-        for _ in range(num_samples)
+    inputs["all_numbers"] = [
+        tokenizer.encode("0123456789 " * seq_len)[:seq_len] for _ in range(num_samples)
     ]
-    inputs['rare_unicode'] = [
-        tokenizer.encode("∀∃∄∅∆∇∈∉∊∋∌∍∎∏" * seq_len)[:seq_len]
-        for _ in range(num_samples)
+    inputs["rare_unicode"] = [
+        tokenizer.encode("∀∃∄∅∆∇∈∉∊∋∌∍∎∏" * seq_len)[:seq_len] for _ in range(num_samples)
     ]
-    
+
     # 4. Structure-based
-    inputs['empty_padding'] = [
-        [tokenizer.pad_token_id] * seq_len
-        for _ in range(num_samples)
-    ]
-    inputs['bos_only'] = [
-        [tokenizer.bos_token_id] * seq_len
-        for _ in range(num_samples)
-    ]
-    
+    inputs["empty_padding"] = [[tokenizer.pad_token_id] * seq_len for _ in range(num_samples)]
+    inputs["bos_only"] = [[tokenizer.bos_token_id] * seq_len for _ in range(num_samples)]
+
     # 5. Language shift
-    inputs['code_heavy'] = [...]  # Dense code snippets
-    inputs['math_symbols'] = [...]  # LaTeX-style math
-    inputs['foreign_script'] = [...]  # Chinese, Arabic, etc.
-    
+    inputs["code_heavy"] = [...]  # Dense code snippets
+    inputs["math_symbols"] = [...]  # LaTeX-style math
+    inputs["foreign_script"] = [...]  # Chinese, Arabic, etc.
+
     return inputs
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -415,6 +394,7 @@ def main():
     baseline = RoutingBaseline.from_probs(global_probs, top_k=2)
 
     model, tokenizer = build_model_and_tokenizer(MODEL_NAME, device)
+
 
 if __name__ == "__main__":
     main()

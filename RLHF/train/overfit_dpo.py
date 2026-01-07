@@ -1,24 +1,23 @@
 # train/overfit_dpo.py
 from __future__ import annotations
 
+import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Sequence, Optional
+from pathlib import Path
+from typing import Any
 
 import torch
-from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
-
-import sys
-from pathlib import Path
+from torch.utils.data import DataLoader, Dataset
 
 # Add parent directory to path to import modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from data.tokenize import tokenize_preference_example
 from data.collate import collate_preference_batch
-from train.dpo import make_reference_model, dpo_step
+from data.tokenize import tokenize_preference_example
 from engine import completion_logprobs, load_model, load_tokenizer
-
+from train.dpo import dpo_step, make_reference_model
 
 DEFAULT_SYSTEM = "You are a helpful assistant."
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -34,7 +33,7 @@ class OverfitConfig:
     lr: float = 5e-6
     beta: float = 0.1
     num_workers: int = 4
-    grad_clip_norm: Optional[float] = 1.0
+    grad_clip_norm: float | None = 1.0
     use_mean_logp: bool = False
 
     # eval cadence
@@ -43,9 +42,7 @@ class OverfitConfig:
 
 
 class TinyPreferenceDataset(Dataset):
-    def __init__(
-        self, tokenizer, raw_examples: Sequence[Dict[str, Any]], *, max_len: int
-    ):
+    def __init__(self, tokenizer, raw_examples: Sequence[dict[str, Any]], *, max_len: int):
         self.tokenizer = tokenizer
         self.raw_examples = list(raw_examples)
         self.max_len = max_len
@@ -55,14 +52,12 @@ class TinyPreferenceDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Any:
         ex = self.raw_examples[idx]
-        return tokenize_preference_example(
-            self.tokenizer, example=ex, max_len=self.max_len
-        )
+        return tokenize_preference_example(self.tokenizer, example=ex, max_len=self.max_len)
 
 
 def move_batch_to_device(
-    batch: Dict[str, torch.Tensor], device: torch.device
-) -> Dict[str, torch.Tensor]:
+    batch: dict[str, torch.Tensor], device: torch.device
+) -> dict[str, torch.Tensor]:
     """Move all tensors in a batch dictionary to the specified device.
 
     Args:
@@ -80,7 +75,7 @@ def preference_eval_stats(
     policy_model: torch.nn.Module,
     dataloader: DataLoader,
     use_mean_logp: bool = False,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Compute evaluation statistics for preference pairs.
 
     Returns both sum-logp and mean-logp diagnostics to detect length bias.
@@ -267,9 +262,7 @@ def overfit_dpo(
     device = next(policy_model.parameters()).device
 
     # Initial eval
-    br = preference_eval_stats(
-        policy_model, train_loader, use_mean_logp=cfg.use_mean_logp
-    )
+    br = preference_eval_stats(policy_model, train_loader, use_mean_logp=cfg.use_mean_logp)
     print(f"Base Win-Rate: {br['win_rate']:.2f}")
 
     # Train loop

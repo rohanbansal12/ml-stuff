@@ -1,5 +1,5 @@
-import torch
 import numpy as np
+import torch
 
 
 class RolloutBuffer:
@@ -29,15 +29,11 @@ class RolloutBuffer:
         if cont:
             self.actions = torch.zeros((steps, num_envs, act_dim), device=device)
         else:
-            self.actions = torch.zeros(
-                (steps, num_envs), dtype=torch.long, device=device
-            )
+            self.actions = torch.zeros((steps, num_envs), dtype=torch.long, device=device)
 
         self.rewards = torch.zeros((steps, num_envs), device=device)
         self.dones = torch.zeros((steps, num_envs), device=device)
-        self.values = torch.zeros(
-            (steps + 1, num_envs), device=device
-        )  # +1 for bootstrap
+        self.values = torch.zeros((steps + 1, num_envs), device=device)  # +1 for bootstrap
         self.log_probs = torch.zeros((steps, num_envs), device=device)
         self.advantages = torch.zeros((steps, num_envs), device=device)
         self.returns = torch.zeros((steps, num_envs), device=device)
@@ -56,9 +52,7 @@ class RolloutBuffer:
         """Store a single timestep of vectorized transitions."""
         assert not self.is_full(), "Buffer is full, call reset() first"
 
-        self.observations[self.ptr] = torch.as_tensor(
-            obs, device=self.device, dtype=torch.float32
-        )
+        self.observations[self.ptr] = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
 
         if self.cont:
             self.actions[self.ptr] = torch.as_tensor(
@@ -67,12 +61,8 @@ class RolloutBuffer:
         else:
             self.actions[self.ptr] = action
 
-        self.rewards[self.ptr] = torch.as_tensor(
-            reward, device=self.device, dtype=torch.float32
-        )
-        self.dones[self.ptr] = torch.as_tensor(
-            done, device=self.device, dtype=torch.float32
-        )
+        self.rewards[self.ptr] = torch.as_tensor(reward, device=self.device, dtype=torch.float32)
+        self.dones[self.ptr] = torch.as_tensor(done, device=self.device, dtype=torch.float32)
         self.values[self.ptr] = value
         self.log_probs[self.ptr] = log_prob
 
@@ -84,9 +74,7 @@ class RolloutBuffer:
     def reset(self):
         self.ptr = 0
 
-    def compute_advantages_and_returns(
-        self, last_value: torch.Tensor, gamma: float, lam: float
-    ):
+    def compute_advantages_and_returns(self, last_value: torch.Tensor, gamma: float, lam: float):
         """Compute GAE-λ advantages and returns.
 
         GAE formula:
@@ -161,12 +149,8 @@ class ReplayBuffer:
         self.num_envs = num_envs
         self.device = device
 
-        self.observations = torch.zeros(
-            (self.buffer_size, num_envs, obs_dim), device=device
-        )
-        self.next_observations = torch.zeros(
-            (self.buffer_size, num_envs, obs_dim), device=device
-        )
+        self.observations = torch.zeros((self.buffer_size, num_envs, obs_dim), device=device)
+        self.next_observations = torch.zeros((self.buffer_size, num_envs, obs_dim), device=device)
         self.actions = torch.zeros((self.buffer_size, num_envs, act_dim), device=device)
         self.rewards = torch.zeros((self.buffer_size, num_envs), device=device)
         self.dones = torch.zeros((self.buffer_size, num_envs), device=device)
@@ -183,30 +167,20 @@ class ReplayBuffer:
         done: np.ndarray,
     ):
         """Store a single timestep of vectorized transitions."""
-        self.observations[self.ptr] = torch.as_tensor(
-            obs, device=self.device, dtype=torch.float32
-        )
+        self.observations[self.ptr] = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
         self.next_observations[self.ptr] = torch.as_tensor(
             next_obs, device=self.device, dtype=torch.float32
         )
-        self.actions[self.ptr] = torch.as_tensor(
-            action, device=self.device, dtype=torch.float32
-        )
-        self.rewards[self.ptr] = torch.as_tensor(
-            reward, device=self.device, dtype=torch.float32
-        )
-        self.dones[self.ptr] = torch.as_tensor(
-            done, device=self.device, dtype=torch.float32
-        )
+        self.actions[self.ptr] = torch.as_tensor(action, device=self.device, dtype=torch.float32)
+        self.rewards[self.ptr] = torch.as_tensor(reward, device=self.device, dtype=torch.float32)
+        self.dones[self.ptr] = torch.as_tensor(done, device=self.device, dtype=torch.float32)
 
         self.ptr += 1
         if self.ptr == self.buffer_size:
             self.full = True
             self.ptr = 0
 
-    def sample(
-        self, batch_size: int, device: torch.device = None
-    ) -> tuple[torch.Tensor, ...]:
+    def sample(self, batch_size: int, device: torch.device = None) -> tuple[torch.Tensor, ...]:
         """Sample a random batch of transitions.
 
         Args:
@@ -236,6 +210,4 @@ class ReplayBuffer:
         return obs, next_obs, actions, rewards, dones
 
     def __len__(self) -> int:
-        return (
-            self.buffer_size * self.num_envs if self.full else self.ptr * self.num_envs
-        )
+        return self.buffer_size * self.num_envs if self.full else self.ptr * self.num_envs

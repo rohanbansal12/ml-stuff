@@ -1,10 +1,10 @@
+import math
+from collections.abc import Generator
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict, Generator
-
 
 # =============================================================================
 # Configuration
@@ -15,7 +15,7 @@ from typing import Optional, List, Tuple, Dict, Generator
 class GPTConfig:
     d_model: int = 256
     num_heads: int = 8
-    num_kv_heads: Optional[int] = None  # None = same as num_heads (MHA)
+    num_kv_heads: int | None = None  # None = same as num_heads (MHA)
     max_seq_len: int = 256
     num_layers: int = 6
     vocab_size: int = 50257
@@ -27,15 +27,18 @@ class GPTConfig:
     def __post_init__(self):
         if self.num_kv_heads is None:
             self.num_kv_heads = self.num_heads
-        assert self.num_heads % self.num_kv_heads == 0, (
-            f"num_heads ({self.num_heads}) must be divisible by num_kv_heads ({self.num_kv_heads})"
-        )
-        assert self.d_model % self.num_heads == 0, (
-            f"d_model ({self.d_model}) must be divisible by num_heads ({self.num_heads})"
-        )
-        assert self.attn_type in ("standard", "flash", "flash2", "sdpa"), (
-            "attn_type must be one of: standard, flash, flash2, sdpa"
-        )
+        assert (
+            self.num_heads % self.num_kv_heads == 0
+        ), f"num_heads ({self.num_heads}) must be divisible by num_kv_heads ({self.num_kv_heads})"
+        assert (
+            self.d_model % self.num_heads == 0
+        ), f"d_model ({self.d_model}) must be divisible by num_heads ({self.num_heads})"
+        assert self.attn_type in (
+            "standard",
+            "flash",
+            "flash2",
+            "sdpa",
+        ), "attn_type must be one of: standard, flash, flash2, sdpa"
 
     @property
     def d_k(self) -> int:
@@ -115,16 +118,16 @@ class KVCache:
             start = start_positions[i].item()
             end = start + seq_len
 
-            assert end <= self.max_seq_len, (
-                f"Sequence exceeded max length: {end} > {self.max_seq_len}"
-            )
+            assert (
+                end <= self.max_seq_len
+            ), f"Sequence exceeded max length: {end} > {self.max_seq_len}"
 
             self.cache[slot, layer_idx, 0, :, start:end, :] = new_k[i]
             self.cache[slot, layer_idx, 1, :, start:end, :] = new_v[i]
 
     def get(
         self, batch_indices: torch.Tensor, layer_idx: int
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Retrieve K, V from cache up to current lengths.
 
@@ -193,9 +196,7 @@ class KVCacheView:
         # Store lengths at view creation for position offset calculation
         self._position_offset = cache.get_lengths(batch_indices).clone()
 
-    def get(
-        self, layer_idx: int
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def get(self, layer_idx: int) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Get cached K, V for a layer."""
         return self.cache.get(self.batch_indices, layer_idx)
 
@@ -322,7 +323,7 @@ class FlashAttentionNaive(nn.Module):
     but demonstrates the memory-efficient algorithm.
     """
 
-    def __init__(self, d_k: int, M: Optional[int] = None, causal: bool = True):
+    def __init__(self, d_k: int, M: int | None = None, causal: bool = True):
         super().__init__()
         self.d_k = d_k
         self.M = M or 1024 * 64
@@ -331,15 +332,11 @@ class FlashAttentionNaive(nn.Module):
         self.scale = 1.0 / math.sqrt(self.d_k)
         self.causal = causal
 
-    def forward(
-        self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
         b, num_heads, seq_len, d_k = Q.shape
         O = torch.zeros_like(Q)
         l = torch.zeros(b, num_heads, seq_len, 1, device=Q.device, dtype=Q.dtype)
-        m = torch.full(
-            (b, num_heads, seq_len, 1), float("-inf"), device=Q.device, dtype=Q.dtype
-        )
+        m = torch.full((b, num_heads, seq_len, 1), float("-inf"), device=Q.device, dtype=Q.dtype)
 
         for j in range(0, seq_len, self.B_c):
             j_end = min(j + self.B_c, seq_len)
@@ -365,9 +362,7 @@ class FlashAttentionNaive(nn.Module):
                     q_pos = torch.arange(i, i_end, device=Q.device).unsqueeze(1)
                     k_pos = torch.arange(j, j_end, device=Q.device).unsqueeze(0)
                     causal_mask = k_pos > q_pos
-                    S_ij = S_ij.masked_fill(
-                        causal_mask.unsqueeze(0).unsqueeze(0), float("-inf")
-                    )
+                    S_ij = S_ij.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
 
                 m_ij = S_ij.max(dim=-1, keepdim=True).values
                 m_new = torch.maximum(m_i, m_ij)
@@ -396,7 +391,7 @@ class FlashAttention2Naive(nn.Module):
     - Returns logsumexp L for potential use in backward pass
     """
 
-    def __init__(self, d_k: int, M: Optional[int] = None, causal: bool = True):
+    def __init__(self, d_k: int, M: int | None = None, causal: bool = True):
         super().__init__()
         self.d_k = d_k
         self.M = M or 1024 * 64
@@ -407,7 +402,7 @@ class FlashAttention2Naive(nn.Module):
 
     def forward(
         self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         b, num_heads, seq_len, d_k = Q.shape
         O = torch.zeros_like(Q)
         L = torch.zeros(b, num_heads, seq_len, 1, device=Q.device, dtype=Q.dtype)
@@ -419,9 +414,7 @@ class FlashAttention2Naive(nn.Module):
 
             O_i = torch.zeros(b, num_heads, Br, d_k, device=Q.device, dtype=Q.dtype)
             l_i = torch.zeros(b, num_heads, Br, 1, device=Q.device, dtype=Q.dtype)
-            m_i = torch.full(
-                (b, num_heads, Br, 1), float("-inf"), device=Q.device, dtype=Q.dtype
-            )
+            m_i = torch.full((b, num_heads, Br, 1), float("-inf"), device=Q.device, dtype=Q.dtype)
 
             j_max = i_end if self.causal else seq_len
 
@@ -437,9 +430,7 @@ class FlashAttention2Naive(nn.Module):
                     q_pos = torch.arange(i, i_end, device=Q.device).unsqueeze(1)
                     k_pos = torch.arange(j, j_end, device=Q.device).unsqueeze(0)
                     causal_mask = k_pos > q_pos
-                    S_ij = S_ij.masked_fill(
-                        causal_mask.unsqueeze(0).unsqueeze(0), float("-inf")
-                    )
+                    S_ij = S_ij.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
 
                 m_ij = S_ij.max(dim=-1, keepdim=True).values
                 m_new = torch.maximum(m_i, m_ij)
@@ -527,9 +518,7 @@ class MultiHeadAttention(nn.Module):
 
         # Causal mask (for standard attention)
         mask = torch.tril(torch.ones(config.max_seq_len, config.max_seq_len))
-        self.register_buffer(
-            "causal_mask", mask.view(1, 1, config.max_seq_len, config.max_seq_len)
-        )
+        self.register_buffer("causal_mask", mask.view(1, 1, config.max_seq_len, config.max_seq_len))
 
         self.dropout = nn.Dropout(config.dropout)
 
@@ -556,7 +545,7 @@ class MultiHeadAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        cache_view: Optional[KVCacheView] = None,
+        cache_view: KVCacheView | None = None,
     ) -> torch.Tensor:
         """
         Forward pass with optional KV-caching.
@@ -576,9 +565,7 @@ class MultiHeadAttention(nn.Module):
         V = self.W_V(x).view(b, s, self.num_kv_heads, self.d_k).transpose(1, 2)
 
         # Get position offset for RoPE
-        position_offset = (
-            cache_view.get_position_offset() if cache_view is not None else 0
-        )
+        position_offset = cache_view.get_position_offset() if cache_view is not None else 0
 
         # Apply RoPE to Q and K
         if self.rope is not None:
@@ -603,9 +590,7 @@ class MultiHeadAttention(nn.Module):
         total_kv_len = K_exp.size(2)
 
         if self.attn_type == "standard":
-            mask = self.causal_mask[
-                :, :, position_offset : position_offset + s, :total_kv_len
-            ]
+            mask = self.causal_mask[:, :, position_offset : position_offset + s, :total_kv_len]
             out = attention_standard(Q, K_exp, V_exp, mask, self.dropout, self.training)
 
         elif self.attn_type == "sdpa":
@@ -625,12 +610,8 @@ class MultiHeadAttention(nn.Module):
             # Note: these don't support KV-cache well due to causal mask assumptions
             if cache_view is not None:
                 # Fall back to standard for cached inference
-                mask = self.causal_mask[
-                    :, :, position_offset : position_offset + s, :total_kv_len
-                ]
-                out = attention_standard(
-                    Q, K_exp, V_exp, mask, self.dropout, self.training
-                )
+                mask = self.causal_mask[:, :, position_offset : position_offset + s, :total_kv_len]
+                out = attention_standard(Q, K_exp, V_exp, mask, self.dropout, self.training)
             else:
                 result = self.flash_attn(Q, K_exp, V_exp)
                 out = result[0] if isinstance(result, tuple) else result
@@ -659,9 +640,7 @@ class SwiGLUFFN(nn.Module):
         super().__init__()
 
         hidden = int(config.d_model * hidden_mult)
-        hidden = (
-            (hidden + 255) // 256
-        ) * 256  # Round to multiple of 256 for efficiency
+        hidden = ((hidden + 255) // 256) * 256  # Round to multiple of 256 for efficiency
 
         self.w1 = nn.Linear(config.d_model, hidden, bias=False)
         self.w2 = nn.Linear(hidden, config.d_model, bias=False)
@@ -688,7 +667,7 @@ class Block(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        cache_view: Optional[KVCacheView] = None,
+        cache_view: KVCacheView | None = None,
     ) -> torch.Tensor:
         x = x + self.attn(self.ln1(x), cache_view=cache_view)
         x = x + self.ffn(self.ln2(x))
@@ -726,9 +705,7 @@ class GPT(nn.Module):
             self.pos_emb = None
 
         # Transformer blocks
-        self.blocks = nn.ModuleList(
-            [Block(config, layer_idx=i) for i in range(config.num_layers)]
-        )
+        self.blocks = nn.ModuleList([Block(config, layer_idx=i) for i in range(config.num_layers)])
 
         # Final layer norm
         norm_cls = RMSNorm if config.rmsnorm else nn.LayerNorm
@@ -756,7 +733,7 @@ class GPT(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        cache_view: Optional[KVCacheView] = None,
+        cache_view: KVCacheView | None = None,
     ) -> torch.Tensor:
         """
         Forward pass.
@@ -842,7 +819,7 @@ class GPT(nn.Module):
         temperature: float = 1.0,
         top_k: int = 0,
         top_p: float = 0.0,
-        cache: Optional[KVCache] = None,
+        cache: KVCache | None = None,
     ) -> torch.Tensor:
         """
         Generate tokens autoregressively with KV-caching.
@@ -916,11 +893,7 @@ class GPT(nn.Module):
 
         for _ in range(max_new_tokens):
             # Truncate if too long
-            x_cond = (
-                x
-                if x.size(1) <= self.config.max_seq_len
-                else x[:, -self.config.max_seq_len :]
-            )
+            x_cond = x if x.size(1) <= self.config.max_seq_len else x[:, -self.config.max_seq_len :]
 
             logits = self.forward(x_cond)
             next_token = self._sample_token(logits[:, -1, :], temperature, top_k, top_p)
@@ -942,7 +915,7 @@ class SlotAllocator:
         self.free_slots = set(range(num_slots))
         self.active_sequences = {}  # seq_id -> slot_id
 
-    def allocate(self, seq_id: int) -> Optional[int]:
+    def allocate(self, seq_id: int) -> int | None:
         """Allocate a slot for a new sequence. Returns None if full."""
         if seq_id in self.active_sequences:
             raise ValueError(f"Sequence {seq_id} already has a slot")
@@ -959,7 +932,7 @@ class SlotAllocator:
         slot = self.active_sequences.pop(seq_id)
         self.free_slots.add(slot)
 
-    def get_slot(self, seq_id: int) -> Optional[int]:
+    def get_slot(self, seq_id: int) -> int | None:
         """Get slot for an active sequence. Returns None if not found."""
         return self.active_sequences.get(seq_id)
 
@@ -972,11 +945,11 @@ class SlotAllocator:
     def num_free(self) -> int:
         return len(self.free_slots)
 
-    def get_active_slots(self) -> List[int]:
+    def get_active_slots(self) -> list[int]:
         """Get list of active slot IDs."""
         return list(self.active_sequences.values())
 
-    def get_active_seq_ids(self) -> List[int]:
+    def get_active_seq_ids(self) -> list[int]:
         """Get list of active sequence IDs."""
         return list(self.active_sequences.keys())
 
@@ -997,13 +970,13 @@ class SequenceState:
 
     seq_id: int
     slot_id: int
-    prompt_tokens: List[int]
-    generated_tokens: List[int]
+    prompt_tokens: list[int]
+    generated_tokens: list[int]
     max_new_tokens: int
     temperature: float = 1.0
     top_k: int = 0
     top_p: float = 0.0
-    stop_token_ids: Optional[List[int]] = None
+    stop_token_ids: list[int] | None = None
 
     @property
     def current_len(self) -> int:
@@ -1058,8 +1031,8 @@ class GenerationEngine:
         self,
         model: GPT,
         max_batch: int,
-        max_seq_len: Optional[int] = None,
-        device: Optional[torch.device] = None,
+        max_seq_len: int | None = None,
+        device: torch.device | None = None,
     ):
         self.model = model
         self.model.eval()
@@ -1084,23 +1057,23 @@ class GenerationEngine:
         self.slots = SlotAllocator(max_batch)
 
         # Sequence tracking
-        self.pending_requests: List[
-            Tuple[int, List[int], int, float, int, float, Optional[List[int]]]
+        self.pending_requests: list[
+            tuple[int, list[int], int, float, int, float, list[int] | None]
         ] = []
-        self.active_sequences: Dict[int, SequenceState] = {}
-        self.completed_sequences: Dict[int, SequenceState] = {}
+        self.active_sequences: dict[int, SequenceState] = {}
+        self.completed_sequences: dict[int, SequenceState] = {}
 
         # ID counter
         self._next_seq_id = 0
 
     def add_request(
         self,
-        prompt_tokens: List[int],
+        prompt_tokens: list[int],
         max_new_tokens: int,
         temperature: float = 1.0,
         top_k: int = 0,
         top_p: float = 0.0,
-        stop_token_ids: Optional[List[int]] = None,
+        stop_token_ids: list[int] | None = None,
     ) -> int:
         """
         Add a generation request.
@@ -1172,7 +1145,7 @@ class GenerationEngine:
                 stop_token_ids=stop_ids,
             )
 
-    def _prefill_new_sequences(self) -> Dict[int, int]:
+    def _prefill_new_sequences(self) -> dict[int, int]:
         """
         Process prompts for newly scheduled sequences.
 
@@ -1182,9 +1155,7 @@ class GenerationEngine:
         results = {}
 
         # Find sequences that need prefill (no generated tokens yet)
-        to_prefill = [
-            seq for seq in self.active_sequences.values() if seq.num_generated == 0
-        ]
+        to_prefill = [seq for seq in self.active_sequences.values() if seq.num_generated == 0]
 
         if not to_prefill:
             return results
@@ -1202,16 +1173,14 @@ class GenerationEngine:
             cache_view.finalize(len(seq.prompt_tokens))
 
             # Sample token
-            next_token = self._sample_token(
-                logits[0, -1, :], seq.temperature, seq.top_k, seq.top_p
-            )
+            next_token = self._sample_token(logits[0, -1, :], seq.temperature, seq.top_k, seq.top_p)
 
             seq.generated_tokens.append(next_token)
             results[seq.seq_id] = next_token
 
         return results
 
-    def _decode_step(self) -> Dict[int, int]:
+    def _decode_step(self) -> dict[int, int]:
         """
         Run one decode step for all active sequences that have started generating.
 
@@ -1232,9 +1201,7 @@ class GenerationEngine:
 
         # Batch decode - all sequences process one token
         batch_size = len(decoding)
-        slot_indices = torch.tensor(
-            [seq.slot_id for seq in decoding], device=self.device
-        )
+        slot_indices = torch.tensor([seq.slot_id for seq in decoding], device=self.device)
 
         # Get last token for each sequence
         last_tokens = torch.tensor(
@@ -1249,9 +1216,7 @@ class GenerationEngine:
 
         # Sample tokens for each sequence
         for i, seq in enumerate(decoding):
-            next_token = self._sample_token(
-                logits[i, -1, :], seq.temperature, seq.top_k, seq.top_p
-            )
+            next_token = self._sample_token(logits[i, -1, :], seq.temperature, seq.top_k, seq.top_p)
             seq.generated_tokens.append(next_token)
             results[seq.seq_id] = next_token
 
@@ -1270,7 +1235,7 @@ class GenerationEngine:
         token = torch.multinomial(probs, num_samples=1).item()
         return token
 
-    def _retire_completed(self) -> List[int]:
+    def _retire_completed(self) -> list[int]:
         """
         Move completed sequences out of active set.
 
@@ -1292,7 +1257,7 @@ class GenerationEngine:
 
         return completed
 
-    def step(self) -> Dict[int, Optional[int]]:
+    def step(self) -> dict[int, int | None]:
         """
         Run one generation step.
 
@@ -1324,7 +1289,7 @@ class GenerationEngine:
         """Check if there's more work to do."""
         return bool(self.pending_requests) or bool(self.active_sequences)
 
-    def run(self) -> Generator[Tuple[int, int], None, None]:
+    def run(self) -> Generator[tuple[int, int], None, None]:
         """
         Run generation to completion, yielding tokens as produced.
 
@@ -1337,18 +1302,18 @@ class GenerationEngine:
                 if token is not None:
                     yield seq_id, token
 
-    def get_sequence(self, seq_id: int) -> Optional[SequenceState]:
+    def get_sequence(self, seq_id: int) -> SequenceState | None:
         """Get sequence state by ID."""
         if seq_id in self.active_sequences:
             return self.active_sequences[seq_id]
         return self.completed_sequences.get(seq_id)
 
-    def get_generated_tokens(self, seq_id: int) -> Optional[List[int]]:
+    def get_generated_tokens(self, seq_id: int) -> list[int] | None:
         """Get generated tokens for a sequence."""
         seq = self.get_sequence(seq_id)
         return seq.generated_tokens if seq else None
 
-    def get_full_sequence(self, seq_id: int) -> Optional[List[int]]:
+    def get_full_sequence(self, seq_id: int) -> list[int] | None:
         """Get prompt + generated tokens for a sequence."""
         seq = self.get_sequence(seq_id)
         if seq is None:
@@ -1386,7 +1351,7 @@ class GenerationEngine:
         self.active_sequences.clear()
         self.completed_sequences.clear()
 
-    def stats(self) -> Dict[str, int]:
+    def stats(self) -> dict[str, int]:
         """Get engine statistics."""
         return {
             "pending": len(self.pending_requests),
@@ -1405,7 +1370,7 @@ class GenerationEngine:
 def create_model(
     d_model: int = 256,
     num_heads: int = 8,
-    num_kv_heads: Optional[int] = None,
+    num_kv_heads: int | None = None,
     max_seq_len: int = 256,
     num_layers: int = 6,
     vocab_size: int = 50257,

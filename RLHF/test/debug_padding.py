@@ -1,12 +1,13 @@
 import sys
-import torch
 from pathlib import Path
+
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from data.tokenize import tokenize_preference_example
 from data.collate import collate_preference_batch
-from engine import load_tokenizer, completion_logprobs, load_model
+from data.tokenize import tokenize_preference_example
+from engine import completion_logprobs, load_model, load_tokenizer
 
 tokenizer = load_tokenizer("Qwen/Qwen2.5-0.5B-Instruct")
 device = torch.device("cuda")
@@ -57,7 +58,7 @@ print(f"Prompt lens: {batch['prompt_lens']}")
 print()
 
 # Check padding for example 0
-B, T = batch['chosen_input_ids'].shape
+B, T = batch["chosen_input_ids"].shape
 print("Example 0 - Chosen sequence:")
 print(f"  Attention mask: {batch['chosen_attention_mask'][0]}")
 print(f"  First 10 input_ids: {batch['chosen_input_ids'][0, :10]}")
@@ -130,11 +131,11 @@ print()
 
 # Check attention pattern
 print("Batch attention mask for example 0:")
-attn_0 = batch['chosen_attention_mask'][0]
+attn_0 = batch["chosen_attention_mask"][0]
 print(f"  Sum (total real tokens): {attn_0.sum().item()}")
 print(f"  First True index: {attn_0.nonzero(as_tuple=True)[0][0].item()}")
 print()
 
 print("Single attention mask:")
 print(f"  Sum (total real tokens): {ca[0].sum().item()}")
-print(f"  First True index: 0 (no padding)")
+print("  First True index: 0 (no padding)")

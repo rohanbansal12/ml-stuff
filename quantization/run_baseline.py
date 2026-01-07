@@ -17,11 +17,11 @@ from datetime import datetime
 from pathlib import Path
 
 from quant_eval import (
-    load_model,
-    load_hellaswag,
-    load_wikitext,
     evaluate_hellaswag,
     evaluate_perplexity,
+    load_hellaswag,
+    load_model,
+    load_wikitext,
 )
 
 
@@ -110,18 +110,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", type=str, default="Qwen/Qwen2.5-1.5B", help="HuggingFace model name"
     )
-    parser.add_argument(
-        "--hellaswag-n", type=int, default=500, help="Number of HellaSwag samples"
-    )
+    parser.add_argument("--hellaswag-n", type=int, default=500, help="Number of HellaSwag samples")
     parser.add_argument(
         "--wikitext-tokens",
         type=int,
         default=4096,
         help="Number of WikiText tokens for perplexity",
     )
-    parser.add_argument(
-        "--no-save", action="store_true", help="Don't save results to file"
-    )
+    parser.add_argument("--no-save", action="store_true", help="Don't save results to file")
 
     args = parser.parse_args()
 

@@ -1,11 +1,12 @@
-import torch
-import gymnasium as gym
-from dataclasses import dataclass, field, asdict
-from collections import deque
 import argparse
+import os
+from collections import deque
+from dataclasses import asdict, dataclass, field
+
+import gymnasium as gym
+import torch
 from net import PolicyNet
 from torch.utils.tensorboard import SummaryWriter
-import os
 
 
 @dataclass
@@ -33,9 +34,7 @@ class Config:
         parser.add_argument("--gamma", type=float, default=cls.gamma)
         parser.add_argument("--norm_returns", action="store_true")
         parser.add_argument("--num_episodes", type=int, default=cls.num_episodes)
-        parser.add_argument(
-            "--hidden_sizes", type=int, nargs="+", default=list(cls.hidden_sizes)
-        )
+        parser.add_argument("--hidden_sizes", type=int, nargs="+", default=list(cls.hidden_sizes))
         parser.add_argument("--env_name", type=str, default=cls.env_name)
         parser.add_argument("--seed", type=int, default=cls.seed)
         parser.add_argument("--log_dir", type=str, default=cls.log_dir)
@@ -87,9 +86,7 @@ class Tracker:
         self.total_steps = 0
         self.total_episodes = 0
 
-    def log_episode(
-        self, episode_return: float, episode_length: int, loss: float, entropy: float
-    ):
+    def log_episode(self, episode_return: float, episode_length: int, loss: float, entropy: float):
         """Log metrics for a training episode."""
         self.total_episodes += 1
         self.total_steps += episode_length
@@ -101,21 +98,15 @@ class Tracker:
         avg_length = sum(self.episode_lengths) / len(self.episode_lengths)
 
         # Log by episode
-        self.writer.add_scalar(
-            "train/episode_return", episode_return, self.total_episodes
-        )
-        self.writer.add_scalar(
-            "train/episode_length", episode_length, self.total_episodes
-        )
+        self.writer.add_scalar("train/episode_return", episode_return, self.total_episodes)
+        self.writer.add_scalar("train/episode_length", episode_length, self.total_episodes)
         self.writer.add_scalar("train/loss", loss, self.total_episodes)
         self.writer.add_scalar("train/entropy", entropy, self.total_episodes)
         self.writer.add_scalar("train/avg_return", avg_return, self.total_episodes)
         self.writer.add_scalar("train/avg_length", avg_length, self.total_episodes)
 
         # Log by steps (for cross-algorithm comparison)
-        self.writer.add_scalar(
-            "train_steps/episode_return", episode_return, self.total_steps
-        )
+        self.writer.add_scalar("train_steps/episode_return", episode_return, self.total_steps)
         self.writer.add_scalar("train_steps/avg_return", avg_return, self.total_steps)
 
         return avg_return, avg_length
@@ -133,9 +124,7 @@ class Tracker:
 
 
 class ReinforceAgent:
-    def __init__(
-        self, obs_dim: int, action_dim: int, config: Config, device: torch.device
-    ):
+    def __init__(self, obs_dim: int, action_dim: int, config: Config, device: torch.device):
         self.policy = PolicyNet(obs_dim, action_dim, config.hidden_sizes).to(device)
         self.gamma = config.gamma
         self.norm_returns = config.norm_returns
@@ -163,9 +152,7 @@ class ReinforceAgent:
 
         return eps
 
-    def evaluate(
-        self, env: gym.Env, num_episodes: int
-    ) -> tuple[list[float], list[int]]:
+    def evaluate(self, env: gym.Env, num_episodes: int) -> tuple[list[float], list[int]]:
         """Run deterministic evaluation episodes."""
         returns = []
         lengths = []

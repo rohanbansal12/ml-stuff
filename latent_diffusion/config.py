@@ -5,10 +5,10 @@ Latent diffusion runs DDPM in the VAE's latent space instead of pixel space.
 This is much faster since the latent is typically 8x8x4 = 256 dims vs 32x32x3 = 3072 dims.
 """
 
-from dataclasses import dataclass, field, asdict
-from typing import Literal, Optional
 import json
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass
@@ -59,7 +59,7 @@ class LatentTrainConfig:
     epochs: int = 200
     lr: float = 3e-4
     weight_decay: float = 0.0
-    grad_clip: Optional[float] = 1.0
+    grad_clip: float | None = 1.0
     ema_decay: float = 0.9999
 
     # Logging
@@ -91,7 +91,7 @@ class LatentDiffusionFullConfig:
     latent_shape: tuple = (4, 8, 8)  # Expected latent shape (C, H, W)
 
     # Experiment metadata
-    run_name: Optional[str] = None
+    run_name: str | None = None
     seed: int = 42
     data_dir: str = "./data"
     log_dir: str = "./runs"

@@ -1,7 +1,7 @@
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions.normal import Normal
-import numpy as np
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -309,12 +309,8 @@ class SoftActorNet(nn.Module):
 
         # Action scaling
         low, high = action_space
-        self.register_buffer(
-            "action_scale", torch.tensor((high - low) / 2.0, dtype=torch.float32)
-        )
-        self.register_buffer(
-            "action_bias", torch.tensor((high + low) / 2.0, dtype=torch.float32)
-        )
+        self.register_buffer("action_scale", torch.tensor((high - low) / 2.0, dtype=torch.float32))
+        self.register_buffer("action_bias", torch.tensor((high + low) / 2.0, dtype=torch.float32))
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         features = self.body(obs)
@@ -323,9 +319,7 @@ class SoftActorNet(nn.Module):
 
         # Clamp log_std via tanh
         log_std = torch.tanh(log_std)
-        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (
-            log_std + 1
-        )
+        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1)
 
         return mean, log_std.exp()
 
@@ -344,6 +338,7 @@ class SoftActorNet(nn.Module):
         log_prob -= torch.log(1 - squashed.square() + 1e-6).sum(dim=-1)
 
         return action, log_prob.unsqueeze(-1)
+
 
 # =============================================================================
 # DQN Networks

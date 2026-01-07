@@ -10,25 +10,25 @@ Usage:
     python evaluate.py --checkpoint /path/to/checkpoint.pt --vae-checkpoint /path/to/vae.pt --num-samples 10000
 """
 
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy import linalg
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from torchvision.models import inception_v3, Inception_V3_Weights
-import numpy as np
-from scipy import linalg
-from pathlib import Path
-import argparse
+from torchvision.models import Inception_V3_Weights, inception_v3
 from tqdm import tqdm
-from typing import Optional
-import sys
 
 sys.path.append(str(Path(__file__).parent.parent))
 
 from latent_diffusion.config import LatentDiffusionFullConfig
+from latent_diffusion.diffusion import DDIMSampler, DDPMSampler, NoiseSchedule
 from latent_diffusion.model import LatentUNet
-from latent_diffusion.diffusion import NoiseSchedule, DDPMSampler, DDIMSampler
 from vae.model import VAE
 
 
@@ -181,7 +181,7 @@ def extract_features(
     dataloader: DataLoader,
     extractor: InceptionFeatureExtractor,
     device: torch.device,
-    max_samples: Optional[int] = None,
+    max_samples: int | None = None,
     desc: str = "Extracting features",
 ) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -345,22 +345,12 @@ def load_model(
 def main():
     parser = argparse.ArgumentParser(description="Evaluate latent diffusion model")
 
-    parser.add_argument(
-        "--checkpoint", type=str, required=True, help="Path to model checkpoint"
-    )
-    parser.add_argument(
-        "--vae-checkpoint", type=str, required=True, help="Path to VAE checkpoint"
-    )
-    parser.add_argument(
-        "--num-samples", type=int, default=10000, help="Number of samples for FID"
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=64, help="Batch size for generation"
-    )
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
+    parser.add_argument("--vae-checkpoint", type=str, required=True, help="Path to VAE checkpoint")
+    parser.add_argument("--num-samples", type=int, default=10000, help="Number of samples for FID")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size for generation")
     parser.add_argument("--use-ddim", action="store_true", help="Use DDIM sampler")
-    parser.add_argument(
-        "--ddim-steps", type=int, default=50, help="DDIM sampling steps"
-    )
+    parser.add_argument("--ddim-steps", type=int, default=50, help="DDIM sampling steps")
     parser.add_argument("--guidance-scale", type=float, help="Override guidance scale")
     parser.add_argument("--save-samples", type=str, help="Path to save sample grid")
 

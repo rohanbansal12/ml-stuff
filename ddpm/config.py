@@ -3,10 +3,10 @@ Configuration system for DDPM training.
 All hyperparameters in one place, easily serializable for reproducibility.
 """
 
-from dataclasses import dataclass, field, asdict
-from typing import Literal, Optional
 import json
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass
@@ -18,9 +18,7 @@ class ModelConfig:
     time_dim: int = 128  # Time embedding dimension
     groups: int = 8  # GroupNorm groups
     num_res_blocks: int = 2  # ResBlocks per resolution level
-    attn_resolutions: tuple = (
-        16,
-    )  # Resolutions where attention is applied (e.g., 16x16)
+    attn_resolutions: tuple = (16,)  # Resolutions where attention is applied (e.g., 16x16)
     use_bottleneck_attn: bool = True
     dropout: float = 0.0
 
@@ -46,7 +44,7 @@ class TrainConfig:
     epochs: int = 100
     lr: float = 3e-4
     weight_decay: float = 0.0
-    grad_clip: Optional[float] = 1.0  # Gradient clipping (None to disable)
+    grad_clip: float | None = 1.0  # Gradient clipping (None to disable)
     ema_decay: float = 0.9999  # EMA decay (0 to disable)
 
     # Logging
@@ -71,7 +69,7 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
 
     # Experiment metadata
-    run_name: Optional[str] = None
+    run_name: str | None = None
     seed: int = 42
     data_dir: str = "./data"
     log_dir: str = "./runs"

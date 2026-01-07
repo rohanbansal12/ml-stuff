@@ -1,24 +1,24 @@
-import torch
 import copy
+
+import torch
 from ptq_utils import (
-    evaluate_simple,
-    get_batch_1d,
-    force_fp32_gemm_all_linears,
-    include,
-    exclude,
-    group_weights,
-    calc_group_scales,
-    quantize_grouped,
+    GPTQLinear,
     HessianAgg,
     attach_one_linear_input_hook,
-    set_module_by_name,
-    get_module_by_name,
-    GPTQLinear,
-    load_model,
+    calc_group_scales,
     create_layer_filter,
+    evaluate_simple,
+    exclude,
+    force_fp32_gemm_all_linears,
+    get_batch_1d,
+    get_module_by_name,
+    group_weights,
+    include,
+    load_model,
+    quantize_grouped,
+    set_module_by_name,
     setup_eval_data,
 )
-
 
 # -----------------------------
 # Config
@@ -42,6 +42,7 @@ DAMP_RATIO = 1e-2
 GROUP_SIZE = 32
 BLOCK_SIZE = 128
 ACT_ORDER = False
+
 
 def naive_quantize_row_w4_grouped(
     w: torch.Tensor, group_size: int = 32, qmax: int = 7, eps: float = 1e-8
@@ -217,7 +218,7 @@ def gptq_quantize_linear_one_layer(
     W = fp_linear.weight.detach().cuda().float()
     out_feat, in_feat = W.shape
     device = W.device
-    
+
     # Move H to GPU once
     H = H_cpu_f32.detach().cuda().float()
 
@@ -227,11 +228,11 @@ def gptq_quantize_linear_one_layer(
         perm = torch.argsort(torch.diagonal(H), descending=True)
         W = W[:, perm]
         H = H[perm][:, perm]
-    
+
     # Cholesky + Inverse
     L = torch.linalg.cholesky(H)
     Q = torch.cholesky_inverse(L)
-    Q = 0.5 * (Q + Q.T) # Symmetrize
+    Q = 0.5 * (Q + Q.T)  # Symmetrize
 
     # 3. Storage
     n_groups = in_feat // group_size
@@ -248,7 +249,7 @@ def gptq_quantize_linear_one_layer(
     for i in range(0, in_feat, block_size):
         i_end = min(i + block_size, in_feat)
         count = i_end - i
-        
+
         Q_block = Q[i:i_end, i:i_end]
         Q_cross = Q[i:i_end, i_end:]
 
@@ -260,7 +261,7 @@ def gptq_quantize_linear_one_layer(
         # -----------------------------------------------------
         for j in range(count):
             col_global = i + j
-            
+
             # A. Calculate Scales (Only at group boundaries)
             if col_global % group_size == 0:
                 # Look ahead in the main W matrix
@@ -272,20 +273,20 @@ def gptq_quantize_linear_one_layer(
                 S_w[:, col_global // group_size, :] = scale
 
             # B. Quantize Single Column
-            s = S_w[:, col_global // group_size, 0] # Fetch pre-calc scale
-            w = W_block[:, j]                       # Current column
-            
+            s = S_w[:, col_global // group_size, 0]  # Fetch pre-calc scale
+            w = W_block[:, j]  # Current column
+
             # Quantize
             q = (w / s).round().clamp(qmin, qmax)
             w_hat = q * s
-            
+
             # Store int8 result
             W_q[:, col_global // group_size, col_global % group_size] = q.to(torch.int8)
 
             # C. Calculate Error & Update Local Block
             d = Q_block[j, j]
             err = (w - w_hat) / d
-            
+
             # Store error in Losses buffer
             Losses[:, j] = err
 
@@ -295,12 +296,12 @@ def gptq_quantize_linear_one_layer(
             # New way: In-place Outer Product (addr_)
             # This fuses the outer product and subtraction, avoiding allocation.
             if j < count - 1:
-                 # W_block slice: [Out, Remaining]
-                 # err:           [Out]
-                 # Q_row:         [Remaining]
-                 # Performs: W_slice = W_slice - 1.0 * (err x Q_row)
-                 W_block[:, (j + 1):].addr_(err, Q_block[j, (j + 1):], alpha=-1.0)
-            
+                # W_block slice: [Out, Remaining]
+                # err:           [Out]
+                # Q_row:         [Remaining]
+                # Performs: W_slice = W_slice - 1.0 * (err x Q_row)
+                W_block[:, (j + 1) :].addr_(err, Q_block[j, (j + 1) :], alpha=-1.0)
+
             # Update the column in W_block to be the error (standard GPTQ trick)
             # This prepares W_block to be used for the global update
             W_block[:, j] = err
@@ -316,7 +317,7 @@ def gptq_quantize_linear_one_layer(
 
     new_layer = GPTQLinear.from_float(fp_linear, W_q, S_w, group_size, perm)
     return new_layer
-    
+
 
 def get_target_linear_names_in_order(model, include, exclude):
     names = []
@@ -332,7 +333,9 @@ def get_target_linear_names_in_order(model, include, exclude):
 
 
 @torch.no_grad()
-def run_gptq_streaming_sequential(q_model, tokens_1d, device, include_filter, exclude_filter, label=''):
+def run_gptq_streaming_sequential(
+    q_model, tokens_1d, device, include_filter, exclude_filter, label=""
+):
     q_model.eval()
 
     # decide layer order once (stable, forward-ish)
@@ -354,10 +357,13 @@ def run_gptq_streaming_sequential(q_model, tokens_1d, device, include_filter, ex
         H = agg.finalize(damp_ratio=DAMP_RATIO)
 
         # 2) quantize this layer using its Hessian
-        fp_linear = get_module_by_name(q_model,  name)
+        fp_linear = get_module_by_name(q_model, name)
         new_mod = gptq_quantize_linear_one_layer(
-            fp_linear, H,
-            qmin=-7, qmax=7, eps=1e-8,
+            fp_linear,
+            H,
+            qmin=-7,
+            qmax=7,
+            eps=1e-8,
             group_size=GROUP_SIZE,
             block_size=BLOCK_SIZE,
             act_order=ACT_ORDER,
@@ -384,8 +390,15 @@ def main():
     print("Loading:", MODEL_NAME)
 
     val_tokens, full_eval_data = setup_eval_data(
-        MODEL_NAME, DATASET_NAME, DATASET_CONFIG, DATASET_SPLIT,
-        BATCH_SIZE, MAX_SEQ_LEN, EVALUATION_BATCHES, SEED, device
+        MODEL_NAME,
+        DATASET_NAME,
+        DATASET_CONFIG,
+        DATASET_SPLIT,
+        BATCH_SIZE,
+        MAX_SEQ_LEN,
+        EVALUATION_BATCHES,
+        SEED,
+        device,
     )
 
     # Evaluate baseline models
@@ -402,17 +415,19 @@ def main():
     # Evaluate GPTQ on different layer groups
     include_fc1 = create_layer_filter(["fc1"])
     fp_model = load_model(MODEL_NAME, device)
-    q_model = run_gptq_streaming_sequential(fp_model, val_tokens, device, include_fc1, exclude, label="fc1")
+    q_model = run_gptq_streaming_sequential(
+        fp_model, val_tokens, device, include_fc1, exclude, label="fc1"
+    )
     loss, perp = evaluate_simple(q_model, full_eval_data)
     print(f"GPTQ fc1:  Loss:{loss:.6f} | Perp:{perp:.6f}")
 
     include_fc2 = create_layer_filter(["fc2"])
     fp_model = load_model(MODEL_NAME, device)
-    q_model = run_gptq_streaming_sequential(fp_model, val_tokens, device, include_fc2, exclude, label='fc2')
+    q_model = run_gptq_streaming_sequential(
+        fp_model, val_tokens, device, include_fc2, exclude, label="fc2"
+    )
     loss, perp = evaluate_simple(q_model, full_eval_data)
     print(f"GPTQ fc2:  Loss:{loss:.6f} | Perp:{perp:.6f}")
-
-
 
 
 if __name__ == "__main__":
