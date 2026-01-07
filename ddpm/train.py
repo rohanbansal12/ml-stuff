@@ -144,7 +144,7 @@ def train_one_epoch(
         if (step + 1) % config.train.log_every == 0:
             avg_loss = total_loss / (step + 1)
             print(
-                f"Epoch {epoch:03d} Step {step+1:04d}/{num_batches} | "
+                f"Epoch {epoch:03d} Step {step + 1:04d}/{num_batches} | "
                 f"Loss: {loss.item() * accum_steps:.4f} (avg: {avg_loss:.4f})"
             )
             writer.add_scalar("Loss/train_step", loss.item() * accum_steps, global_step)
@@ -389,7 +389,6 @@ def main():
             autocast_dtype,
         )
 
-        global_step = (epoch + 1) * len(train_loader)
         writer.add_scalar("Loss/train_epoch", train_loss, epoch)
 
         print(f"\nEpoch {epoch:03d} complete | Avg Loss: {train_loss:.4f}")

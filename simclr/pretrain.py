@@ -48,14 +48,13 @@ def train_one_epoch(model, train_loader, optimizer, temp, device, epoch):
         loss.backward()
         optimizer.step()
 
-        B = im1.shape[0]
         running_loss += loss.item()
         batches += 1
 
         if (batch_idx + 1) % 25 == 0:
             print(
                 f"Epoch [{epoch}] "
-                f"Step [{batch_idx+1}/{len(train_loader)}] "
+                f"Step [{batch_idx + 1}/{len(train_loader)}] "
                 f"Loss: {loss.item():.4f}"
             )
 

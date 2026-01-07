@@ -1471,7 +1471,6 @@ def test_layer_filtering():
             return self.lm_head(x)
 
     model = NamedMLP()
-    x = torch.randn(8, 64)
 
     # Test 1: Exclude embed and lm_head (common pattern)
     config = QuantConfig(

@@ -64,7 +64,6 @@ def main():
 
     writer.add_text("hparams", str(vars(args)))
 
-    best_acc = 0.0
     for epoch in range(1, args.epochs + 1):
         train_loss, train_acc = train_one_epoch(
             model, train_loader, optimizer, criterion, device, epoch

@@ -563,9 +563,7 @@ def train_one_epoch(
         # Logging
         global_step = epoch * num_batches + step
         if (step + 1) % config.train.log_every == 0:
-            print(
-                f"Epoch {epoch:03d} Step {step + 1:04d}/{num_batches} | " f"Loss: {loss.item():.4f}"
-            )
+            print(f"Epoch {epoch:03d} Step {step + 1:04d}/{num_batches} | Loss: {loss.item():.4f}")
             writer.add_scalar("Loss/train_step", loss.item(), global_step)
 
             # Log grad norm

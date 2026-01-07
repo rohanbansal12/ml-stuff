@@ -391,7 +391,6 @@ def main():
     device = torch.device(DEVICE)
 
     logit_dict, global_probs, sequence_lengths = load_logits(args.logit_dir)
-    baseline = RoutingBaseline.from_probs(global_probs, top_k=2)
 
     model, tokenizer = build_model_and_tokenizer(MODEL_NAME, device)
 

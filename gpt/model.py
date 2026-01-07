@@ -1200,7 +1200,6 @@ class GenerationEngine:
             return results
 
         # Batch decode - all sequences process one token
-        batch_size = len(decoding)
         slot_indices = torch.tensor([seq.slot_id for seq in decoding], device=self.device)
 
         # Get last token for each sequence

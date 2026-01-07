@@ -367,16 +367,6 @@ def plot(rank_dict, s_star, run_name, out_dir):
     # Build a long-form DF: for each rank, list singular values of learned ΔW
     sv_rows = []
 
-    # True Δ* singular values (same for all ranks) — include once for overlay
-    true_df = pd.DataFrame(
-        {
-            "rank": -1,
-            "i": np.arange(1, len(s_star) + 1),
-            "singular_value": s_star,
-            "type": "True Δ*",
-        }
-    )
-
     for r, d in rank_dict.items():
         if r == 0:
             continue
@@ -393,12 +383,6 @@ def plot(rank_dict, s_star, run_name, out_dir):
                 }
             )
         )
-
-    learned_df = (
-        pd.concat(sv_rows, ignore_index=True)
-        if sv_rows
-        else pd.DataFrame(columns=["rank", "i", "singular_value", "type"])
-    )
 
     # Plot a "small multiples" style: one plot per rank, overlay true vs learned
     # (Looks good and makes the rank-cap obvious)

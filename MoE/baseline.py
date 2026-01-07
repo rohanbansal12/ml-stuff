@@ -432,7 +432,6 @@ def save_routing_weight_plots(
 
     # Extract numpy arrays
     primary_weight = stats["primary_weight"].numpy()
-    secondary_weight = stats["secondary_weight"].numpy()
     weight_diff = stats["weight_diff"].numpy()
     weight_ratio = stats["weight_ratio"].numpy()
     selected_entropy = stats["selected_entropy"].numpy()
@@ -822,7 +821,7 @@ def analyze_routing_weights_by_category(
         cat_stds.append(pw.std())
 
     x = np.arange(len(categories))
-    bars = ax.bar(x, cat_means, yerr=cat_stds, capsize=5, color="steelblue", alpha=0.8)
+    ax.bar(x, cat_means, yerr=cat_stds, capsize=5, color="steelblue", alpha=0.8)
     ax.axhline(0.5, color="red", linestyle="--", label="Equal weights")
     ax.set_xticks(x)
     ax.set_xticklabels(categories, rotation=45, ha="right")
@@ -2121,8 +2120,6 @@ def analyze_cross_layer_consistency(
     sticky_pairs = []
 
     for layer in range(num_layers - 1):
-        trans = output_dict["transition_matrices"][layer]
-
         # Expected under independence
         marginal_current = torch.bincount(expert_ids[layer], minlength=num_experts).float()
         marginal_current = marginal_current / total_tokens

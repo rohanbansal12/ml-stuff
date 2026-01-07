@@ -360,7 +360,7 @@ def detect_anomalies(
     # Check for loss spike
     if prev_loss is not None and loss > prev_loss * loss_spike_threshold:
         warnings.append(
-            f"WARNING: Loss spiked from {prev_loss:.4f} to {loss:.4f} ({loss/prev_loss:.1f}x)"
+            f"WARNING: Loss spiked from {prev_loss:.4f} to {loss:.4f} ({loss / prev_loss:.1f}x)"
         )
 
     # Check for gradient explosion
@@ -378,9 +378,9 @@ def print_diagnostics_summary(diagnostics: TrainingDiagnostics, lr: float, step:
     """Print a formatted summary of diagnostics."""
     summary = diagnostics.get_summary(lr)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Diagnostics Summary (Step {step})")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  Total Grad Norm:    {summary['total_grad_norm']:.4f}")
     print(f"  Total Weight Norm:  {summary['total_weight_norm']:.4f}")
     print(f"  Avg Update Ratio:   {summary['avg_update_ratio']:.6f}")
@@ -393,4 +393,4 @@ def print_diagnostics_summary(diagnostics: TrainingDiagnostics, lr: float, step:
         name, norm = summary["min_grad_norm_layer"]
         print(f"  Min Grad Layer:     {name} ({norm:.6f})")
 
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
