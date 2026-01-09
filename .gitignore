@@ -16,6 +16,7 @@ ckpts/
 ddpm/data/
 vae/data/
 latent_diffusion/data/
+resnet/data/
 
 # Distribution / packaging
 .Python
