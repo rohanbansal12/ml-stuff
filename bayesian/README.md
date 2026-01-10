@@ -95,10 +95,13 @@ The simplest way to get uncertainty from an existing neural network.
 **Key insight** (Gal & Ghahramani, 2016): Dropout at test time approximates sampling from the posterior.
 
 Each forward pass with dropout active produces a different "thinned" network:
+
 $$\hat{y}_t = f_{\mathbf{w} \odot \mathbf{z}_t}(\mathbf{x}), \quad z_{ti} \sim \text{Bernoulli}(1-p)$$
 
 **Predictive distribution via Monte Carlo:**
+
 $$\mathbb{E}[y \mid \mathbf{x}] \approx \frac{1}{T} \sum_{t=1}^{T} \hat{y}_t$$
+
 $$\text{Var}[y \mid \mathbf{x}] \approx \frac{1}{T} \sum_{t=1}^{T} (\hat{y}_t - \bar{y})^2$$
 
 ### Implementation
