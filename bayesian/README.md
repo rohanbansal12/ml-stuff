@@ -67,11 +67,11 @@ $$\boldsymbol{\Sigma}_N = \left( \tau \mathbf{I} + \sigma^{-2} \mathbf{X}^\top \
 $$\boldsymbol{\mu}_N = \sigma^{-2} \boldsymbol{\Sigma}_N \mathbf{X}^\top \mathbf{y}$$
 
 **Predictive distribution:**
-$$p(y^* \mid \mathbf{x}^*, \mathbf{X}, \mathbf{y}) = \mathcal{N}\left( \boldsymbol{\mu}_N^\top \mathbf{x}^*, \sigma^2 + \mathbf{x}^{*\top} \boldsymbol{\Sigma}_N \mathbf{x}^* \right)$$
+$$p(y^\ast \mid \mathbf{x}^\ast, \mathbf{X}, \mathbf{y}) = \mathcal{N}\left( \boldsymbol{\mu}_N^\top \mathbf{x}^\ast, \sigma^2 + \mathbf{x}^{\ast\top} \boldsymbol{\Sigma}_N \mathbf{x}^\ast \right)$$
 
 The predictive variance has two terms:
 - $\sigma^2$ — aleatoric uncertainty (observation noise)
-- $\mathbf{x}^{*\top} \boldsymbol{\Sigma}_N \mathbf{x}^*$ — epistemic uncertainty (weight uncertainty)
+- $\mathbf{x}^{\ast\top} \boldsymbol{\Sigma}_N \mathbf{x}^\ast$ — epistemic uncertainty (weight uncertainty)
 
 ### Results
 
