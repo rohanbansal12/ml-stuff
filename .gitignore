@@ -17,6 +17,7 @@ ddpm/data/
 vae/data/
 latent_diffusion/data/
 resnet/data/
+bayesian/data/
 
 # Distribution / packaging
 .Python

@@ -11,7 +11,6 @@ dependencies = [
     "einops",
     "numpy",
     "scipy",
-
     # Hugging Face ecosystem
     "transformers",
     "datasets",
@@ -22,25 +21,22 @@ dependencies = [
     "peft",
     "trl",
     "bitsandbytes; sys_platform == 'linux'",
-
     # Visualization & data
     "matplotlib",
     "seaborn",
     "pandas",
     "pillow",
-
     # RL
     "gymnasium",
-
     # Jupyter
     "jupyter",
     "jupyterlab",
     "ipywidgets",
-
     # Utilities
     "tqdm",
     "pyyaml",
     "tensorboard",
+    "scikit-learn>=1.7.2",
 ]
 
 [project.optional-dependencies]
