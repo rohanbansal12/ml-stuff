@@ -3,15 +3,15 @@ ODE Solvers - Foundation for Neural ODEs
 
 Before neural ODEs, understand how to solve ODEs numerically.
 
-An ODE: dz/dt = f(z, t)
+An ODE: dz/dt = f(t, z)
 Given initial condition z(t0) = z0, find z(t1).
 
 Key insight for Neural ODEs:
     Instead of f being a known function, f is a neural network!
-    z(t1) = z(t0) + ∫[t0 to t1] f(z(t), t; θ) dt
+    z(t1) = z(t0) + ∫[t0 to t1] f(t, z(t); θ) dt
 
 Numerical methods (in order of accuracy):
-    1. Euler: z(t+h) = z(t) + h * f(z, t)
+    1. Euler: z(t+h) = z(t) + h * f(t, z)
     2. Midpoint: Use slope at midpoint
     3. RK4: Weighted average of 4 slope estimates
     4. Adaptive: Adjust step size based on error estimate
@@ -32,10 +32,10 @@ import torch
 def euler_step(f: Callable, z: torch.Tensor, t: float, h: float):
     """Single Euler step.
 
-    z(t+h) = z(t) + h * f(z, t)
+    z(t+h) = z(t) + h * f(t, z)
 
     Args:
-        f: Dynamics function f(z, t) -> dz/dt
+        f: Dynamics function f(t, z) -> dz/dt
         z: Current state
         t: Current time
         h: Step size
@@ -43,23 +43,23 @@ def euler_step(f: Callable, z: torch.Tensor, t: float, h: float):
     Returns:
         z at time t+h
     """
-    return z + h * f(z, t)
+    return z + h * f(t, z)
 
 
 def rk4_step(f: Callable, z: torch.Tensor, t: float, h: float):
     """Single RK4 (Runge-Kutta 4th order) step.
 
     Classic 4th order method:
-        k1 = f(z, t)
-        k2 = f(z + h/2 * k1, t + h/2)
-        k3 = f(z + h/2 * k2, t + h/2)
-        k4 = f(z + h * k3, t + h)
+        k1 = f(t, z)
+        k2 = f(t + h/2, z + h/2 * k1)
+        k3 = f(t + h/2, z + h/2 * k2)
+        k4 = f(t + h, z + h * k3)
         z(t+h) = z + h/6 * (k1 + 2*k2 + 2*k3 + k4)
 
     Much more accurate than Euler for same step size.
 
     Args:
-        f: Dynamics function f(z, t) -> dz/dt
+        f: Dynamics function f(t, z) -> dz/dt
         z: Current state
         t: Current time
         h: Step size
@@ -67,10 +67,10 @@ def rk4_step(f: Callable, z: torch.Tensor, t: float, h: float):
     Returns:
         z at time t+h
     """
-    k1 = f(z, t)
-    k2 = f(z + h / 2 * k1, t + h / 2)
-    k3 = f(z + h / 2 * k2, t + h / 2)
-    k4 = f(z + h * k3, t + h)
+    k1 = f(t, z)
+    k2 = f(t + h / 2, z + h / 2 * k1)
+    k3 = f(t + h / 2, z + h / 2 * k2)
+    k4 = f(t + h, z + h * k3)
 
     return z + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
 
@@ -79,7 +79,7 @@ def odeint(f: Callable, z0: torch.Tensor, t: torch.Tensor, method: str = "rk4"):
     """Integrate ODE from t[0] to t[-1], returning z at all times in t.
 
     Args:
-        f: Dynamics function f(z, t) -> dz/dt
+        f: Dynamics function f(t, z) -> dz/dt
         z0: Initial condition, shape (batch, dim) or (dim,)
         t: Times to evaluate at, shape (n_times,), must be sorted
         method: Integration method, "rk4" or "euler"
@@ -126,17 +126,17 @@ def _dopri5_step(
     # 4th order weights (for error estimation)
     e1, e2, e3, e4, e5, e6, e7 = 5179/57600, 0, 7571/16695, 393/640, -92097/339200, 187/2100, 1/40
 
-    k1 = f(z, t)
-    k2 = f(z + h * a21 * k1, t + c2 * h)
-    k3 = f(z + h * (a31 * k1 + a32 * k2), t + c3 * h)
-    k4 = f(z + h * (a41 * k1 + a42 * k2 + a43 * k3), t + c4 * h)
-    k5 = f(z + h * (a51 * k1 + a52 * k2 + a53 * k3 + a54 * k4), t + c5 * h)
-    k6 = f(z + h * (a61 * k1 + a62 * k2 + a63 * k3 + a64 * k4 + a65 * k5), t + c6 * h)
+    k1 = f(t, z)
+    k2 = f(t + c2 * h, z + h * a21 * k1)
+    k3 = f(t + c3 * h, z + h * (a31 * k1 + a32 * k2))
+    k4 = f(t + c4 * h, z + h * (a41 * k1 + a42 * k2 + a43 * k3))
+    k5 = f(t + c5 * h, z + h * (a51 * k1 + a52 * k2 + a53 * k3 + a54 * k4))
+    k6 = f(t + c6 * h, z + h * (a61 * k1 + a62 * k2 + a63 * k3 + a64 * k4 + a65 * k5))
 
     # 5th order solution
     z_new = z + h * (b1 * k1 + b3 * k3 + b4 * k4 + b5 * k5 + b6 * k6)
 
-    k7 = f(z_new, t + h)
+    k7 = f(t + h, z_new)
 
     # Error estimate: difference between 5th and 4th order
     z_err = h * ((b1 - e1) * k1 + (b3 - e3) * k3 + (b4 - e4) * k4 +
@@ -161,7 +161,7 @@ def odeint_adaptive(
     Error control: |error| < atol + rtol * |z|
 
     Args:
-        f: Dynamics function f(z, t) -> dz/dt
+        f: Dynamics function f(t, z) -> dz/dt
         z0: Initial condition, shape (batch, dim) or (dim,)
         t: Times to evaluate at, shape (n_times,), must be sorted
         rtol: Relative tolerance
@@ -231,12 +231,12 @@ def odeint_adaptive(
 # ============ Test Problems ============
 
 
-def exponential_decay(z: torch.Tensor, t: float):
+def exponential_decay(t: float, z: torch.Tensor):
     """dz/dt = -z, solution: z(t) = z(0) * exp(-t)"""
     return -z
 
 
-def harmonic_oscillator(z: torch.Tensor, t: float):
+def harmonic_oscillator(t: float, z: torch.Tensor):
     """2D system: position and velocity of harmonic oscillator.
 
     dz/dt = [v, -x] where z = [x, v]
@@ -249,8 +249,8 @@ def harmonic_oscillator(z: torch.Tensor, t: float):
 
 
 def lotka_volterra(
-    z: torch.Tensor,
     t: float,
+    z: torch.Tensor,
     alpha: float = 1.0,
     beta: float = 0.1,
     gamma: float = 1.5,
@@ -344,8 +344,8 @@ def main():
     t = torch.linspace(0, 50, 501)
 
     # lotka_volterra has extra params, so wrap it
-    def lv(z, t):
-        return lotka_volterra(z, t)
+    def lv(t, z):
+        return lotka_volterra(t, z)
 
     z_traj = odeint(lv, z0, t, method="rk4")
     prey = z_traj[:, 0]

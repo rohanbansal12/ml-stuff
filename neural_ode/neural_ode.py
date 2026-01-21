@@ -41,12 +41,15 @@ Exercises:
 import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
 import torch
 import torch.nn as nn
 
-sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent))
 
-from neural_ode.ode_basics import euler_step, odeint, rk4_step
+from ode_basics import euler_step, odeint, rk4_step
 
 
 class ODEFunc(nn.Module):
@@ -263,9 +266,7 @@ class ODEAdjoint(torch.autograd.Function):
         return (a, None, None, None, None, *param_grads)
 
 
-def odeint_adjoint(
-    func: ODEFunc, h0: torch.Tensor, t0: float, t1: float, n_steps: int = 10
-):
+def odeint_adjoint(func: ODEFunc, h0: torch.Tensor, t0: float, t1: float, n_steps: int = 10):
     """Memory-efficient ODE integration with adjoint backward.
 
     Drop-in replacement for regular odeint, but uses O(1) memory.
@@ -372,10 +373,12 @@ def main():
     # Load MNIST
     from torchvision import datasets, transforms
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,)),
-    ])
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,)),
+        ]
+    )
 
     train_dataset = datasets.MNIST("./data", train=True, download=True, transform=transform)
     test_dataset = datasets.MNIST("./data", train=False, transform=transform)
@@ -502,14 +505,9 @@ def main():
     print("Visualizing Feature Trajectories")
     print("=" * 50)
 
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    import numpy as np
-    from pathlib import Path
-
     # Create plots directory
-    plots_dir = Path(__file__).parent / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    plots_dir = Path(__file__).parent / "plots" / "neural"
+    plots_dir.mkdir(parents=True, exist_ok=True)
 
     # Set seaborn style
     sns.set_theme(style="whitegrid", palette="tab10")
@@ -571,10 +569,35 @@ def main():
     for digit in range(10):
         traj = traj_2d[:, digit, :]
         ax.plot(traj[:, 0], traj[:, 1], color=colors[digit], linewidth=2, alpha=0.7)
-        ax.scatter(traj[0, 0], traj[0, 1], color=colors[digit], s=100, marker="o", edgecolor="white", linewidth=2, zorder=5)
-        ax.scatter(traj[-1, 0], traj[-1, 1], color=colors[digit], s=150, marker="s", edgecolor="white", linewidth=2, zorder=5)
-        ax.annotate(str(digit), (traj[-1, 0], traj[-1, 1]), fontsize=12, fontweight="bold",
-                    ha="center", va="center", color="white")
+        ax.scatter(
+            traj[0, 0],
+            traj[0, 1],
+            color=colors[digit],
+            s=100,
+            marker="o",
+            edgecolor="white",
+            linewidth=2,
+            zorder=5,
+        )
+        ax.scatter(
+            traj[-1, 0],
+            traj[-1, 1],
+            color=colors[digit],
+            s=150,
+            marker="s",
+            edgecolor="white",
+            linewidth=2,
+            zorder=5,
+        )
+        ax.annotate(
+            str(digit),
+            (traj[-1, 0], traj[-1, 1]),
+            fontsize=12,
+            fontweight="bold",
+            ha="center",
+            va="center",
+            color="white",
+        )
 
     ax.set_xlabel("PCA Component 1", fontsize=12)
     ax.set_ylabel("PCA Component 2", fontsize=12)
@@ -582,7 +605,10 @@ def main():
 
     # Add legend
     from matplotlib.lines import Line2D
-    legend_elements = [Line2D([0], [0], color=colors[i], linewidth=2, label=str(i)) for i in range(10)]
+
+    legend_elements = [
+        Line2D([0], [0], color=colors[i], linewidth=2, label=str(i)) for i in range(10)
+    ]
     ax.legend(handles=legend_elements, title="Digit", loc="upper right", ncol=2)
 
     plt.tight_layout()
@@ -595,13 +621,30 @@ def main():
     final_pos = traj_2d[-1]
 
     for digit in range(10):
-        ax.scatter(final_pos[digit, 0], final_pos[digit, 1], color=colors[digit], s=400, edgecolor="white", linewidth=2)
-        ax.annotate(str(digit), (final_pos[digit, 0], final_pos[digit, 1]),
-                    fontsize=16, fontweight="bold", ha="center", va="center", color="white")
+        ax.scatter(
+            final_pos[digit, 0],
+            final_pos[digit, 1],
+            color=colors[digit],
+            s=400,
+            edgecolor="white",
+            linewidth=2,
+        )
+        ax.annotate(
+            str(digit),
+            (final_pos[digit, 0], final_pos[digit, 1]),
+            fontsize=16,
+            fontweight="bold",
+            ha="center",
+            va="center",
+            color="white",
+        )
 
     ax.set_xlabel("PCA Component 1", fontsize=12)
     ax.set_ylabel("PCA Component 2", fontsize=12)
-    ax.set_title("Final Feature Positions (t=1)\nDigits close together have similar learned representations", fontsize=14)
+    ax.set_title(
+        "Final Feature Positions (t=1)\nDigits close together have similar learned representations",
+        fontsize=14,
+    )
 
     plt.tight_layout()
     plt.savefig(plots_dir / "final_positions.png", dpi=150, bbox_inches="tight")
@@ -637,7 +680,9 @@ def main():
         t_vals = np.linspace(0, 1, n_viz_steps + 1)
 
         # Color by time
-        scatter = ax.scatter(traj[:, 0], traj[:, 1], c=t_vals, cmap="viridis", s=50, edgecolor="white", linewidth=0.5)
+        scatter = ax.scatter(
+            traj[:, 0], traj[:, 1], c=t_vals, cmap="viridis", s=50, edgecolor="white", linewidth=0.5
+        )
         ax.plot(traj[:, 0], traj[:, 1], color="gray", alpha=0.3, linewidth=1)
 
         ax.set_title(f"Digit {digit}", fontsize=12, fontweight="bold")
@@ -650,7 +695,9 @@ def main():
     cbar = fig.colorbar(scatter, cax=cbar_ax)
     cbar.set_label("Time (t)", fontsize=12)
 
-    fig.suptitle("Individual Digit Trajectories Through Neural ODE", fontsize=14, fontweight="bold", y=1.02)
+    fig.suptitle(
+        "Individual Digit Trajectories Through Neural ODE", fontsize=14, fontweight="bold", y=1.02
+    )
     plt.tight_layout()
     plt.savefig(plots_dir / "individual_trajectories.png", dpi=150, bbox_inches="tight")
     plt.close()

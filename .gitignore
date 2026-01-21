@@ -18,6 +18,7 @@ vae/data/
 latent_diffusion/data/
 resnet/data/
 bayesian/data/
+neural_ode/data/
 
 # Distribution / packaging
 .Python
